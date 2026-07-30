@@ -4,8 +4,10 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { History, ChevronUp, ChevronDown, XCircle } from 'lucide-react';
 import { format } from 'date-fns';
 import { LeaveRequest } from '../../../types/attendance';
-import { getWorkingDaysDifference } from '../../../lib/attendanceUtils';
+import { getWorkingDaysDifference, getMaxShiftWithBuffer } from '../../../lib/attendanceUtils';
 import { useMasterData } from '../../../hooks/useMasterData';
+import { ApproveRequestParams } from '../../../hooks/useAdminApprovals';
+import { useGlobalDialog } from '../../../context/GlobalDialogContext';
 import { attendanceService } from '../../../services/attendanceService';
 
 // Import refactored sub-components
@@ -13,28 +15,25 @@ import { RequestHeader } from './request-detail/RequestHeader';
 import { RequestInfoSection } from './request-detail/RequestInfoSection';
 import { LeaveHistoryTimeline } from './request-detail/LeaveHistoryTimeline';
 import { AdminOtAdjustment } from './request-detail/AdminOtAdjustment';
-import { AttachmentPreview } from './request-detail/AttachmentPreview';
 import { ActionFooter } from './request-detail/ActionFooter';
 import { parseReason } from './request-detail/utils';
+import { HpPenaltySection } from './request-detail/HpPenaltySection';
+import { getRegistryItem } from '../../../constants/attendanceRegistry';
 
 interface RequestDetailModalProps {
     request: LeaveRequest | null;
     isOpen: boolean;
     onClose: () => void;
-    onApprove: (
-        req: LeaveRequest, 
-        customOtHours?: number, 
-        customStartTime?: string, 
-        customEndTime?: string,
-        adminNote?: string
-    ) => Promise<void>;
-    onReject: (id: string, reason: string) => Promise<void>;
+    onApprove: (params: ApproveRequestParams) => Promise<void>;
+    onReject: (id: string, reason: string, customCheckInTime?: string, hpPenalty?: number, rejectionMode?: 'ABSENT' | 'ACTION_REQUIRED' | 'KEEP_WORKING') => Promise<void>;
+    initialRejectMode?: boolean;
 }
 
 export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({
-    request, isOpen, onClose, onApprove, onReject
+    request, isOpen, onClose, onApprove, onReject, initialRejectMode = false
 }) => {
-    const { annualHolidays, calendarExceptions } = useMasterData();
+    const { annualHolidays, calendarExceptions, masterOptions } = useMasterData();
+    const { showAlert } = useGlobalDialog();
     const [isSubmitting, setIsSubmitting] = useState(false);
 
     // Admin OT Customization States
@@ -48,8 +47,43 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({
     const [isLoadingHistory, setIsLoadingHistory] = useState(false);
     const [isHistoryExpanded, setIsHistoryExpanded] = useState(false);
     const [isMobileFlipped, setIsMobileFlipped] = useState(false);
+    const [hpPenalty, setHpPenalty] = useState<number>(0);
+    const [isMobile, setIsMobile] = useState(typeof window !== 'undefined' ? window.innerWidth < 1024 : false);
+
+    useEffect(() => {
+        if (typeof window !== 'undefined') {
+            const checkViewport = () => {
+                setIsMobile(window.innerWidth < 1024);
+            };
+            checkViewport();
+            window.addEventListener('resize', checkViewport);
+            return () => window.removeEventListener('resize', checkViewport);
+        }
+    }, []);
+
+    const isProvisional = !!(request && (
+        request.type === 'FORGOT_CHECKIN' || 
+        request.type === 'LATE_ENTRY' ||
+        request.type === 'WFH' || 
+        request.type === 'ONSITE' ||
+        (request.reason && (
+            request.reason.includes('[PROVISIONAL_WFH]') || 
+            request.reason.includes('[PROVISIONAL_ONSITE]') ||
+            request.reason.includes('[PROVISIONAL_FORGOT_CHECKIN]') ||
+            request.reason.includes('[PROVISIONAL_LATE_ENTRY]')
+        ))
+    ));
+
+    const shouldShowHpPenalty = !!(request && (
+        isProvisional ||
+        request.type === 'LATE_ENTRY' ||
+        request.type === 'FORGOT_CHECKIN' ||
+        request.type === 'FORGOT_CHECKOUT' ||
+        request.type === 'FORGOT_BOTH'
+    ));
 
     const parsed = parseReason(request?.reason || '');
+    const isFixedOt = !!(request && ((request as any).isFixed || (request as any).is_fixed || parsed.isFixedOt));
 
     useEffect(() => {
         setAdminNote('');
@@ -70,6 +104,10 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({
                     sTime = '';
                     eTime = '';
                 }
+            }
+            if (isFixedOt) {
+                sTime = '00:00';
+                eTime = '00:00';
             }
             setEditStartTime(sTime);
             setEditEndTime(eTime);
@@ -109,7 +147,7 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({
     // Calculate duration details
     let durationText = '';
     if (isLeave) {
-        const days = getWorkingDaysDifference(request.startDate, request.endDate, annualHolidays, calendarExceptions);
+        const days = getWorkingDaysDifference(request.startDate, request.endDate, annualHolidays, calendarExceptions, null, true);
         durationText = `รวมเป็นเวลา ${days} วันทำการ`;
     }
 
@@ -136,17 +174,41 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({
         originalOtHours = parsedReason.otHours || '';
     }
 
-    const handleApprove = async () => {
+    const handleApprove = async (customStartTimeArg?: string) => {
         setIsSubmitting(true);
         try {
-            const hasCustom = request.type === 'OVERTIME' && editOtHours !== '';
-            await onApprove(
+            const isOvertime = request.type === 'OVERTIME';
+            const finalStartTime = isOvertime
+                ? (editStartTime !== originalStartTime ? editStartTime : undefined)
+                : (customStartTimeArg || editStartTime || undefined);
+            const finalEndTime = isOvertime
+                ? (editEndTime !== originalEndTime ? editEndTime : undefined)
+                : (editEndTime || undefined);
+            const hasCustom = isOvertime && editOtHours !== '' && editOtHours !== originalOtHours;
+
+            // Centralized check-in/start time validation using helper - bypassed for admin overrides
+
+            await onApprove({
                 request,
-                hasCustom ? parseFloat(editOtHours) : undefined,
-                editStartTime || undefined,
-                editEndTime || undefined,
-                adminNote || undefined
-            );
+                customOtHours: hasCustom ? parseFloat(editOtHours) : undefined,
+                customStartTime: finalStartTime,
+                customEndTime: finalEndTime,
+                adminNote: adminNote || undefined,
+                hpPenalty: hpPenalty || undefined
+            });
+            onClose();
+        } catch (e: any) {
+            console.error(e);
+            showAlert(e?.message || 'เกิดข้อผิดพลาดในการอนุมัติ', 'ไม่สามารถอนุมัติได้');
+        } finally {
+            setIsSubmitting(false);
+        }
+    };
+
+    const handleRejectSubmit = async (reason: string, customCheckInTime?: string, rejectionMode?: 'ABSENT' | 'ACTION_REQUIRED' | 'KEEP_WORKING') => {
+        setIsSubmitting(true);
+        try {
+            await onReject(request!.id, reason, customCheckInTime, hpPenalty || undefined, rejectionMode);
             onClose();
         } catch (e) {
             console.error(e);
@@ -155,24 +217,23 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({
         }
     };
 
-    const handleRejectSubmit = async (reason: string) => {
-        setIsSubmitting(true);
-        try {
-            await onReject(request.id, reason);
-            onClose();
-        } catch (e) {
-            console.error(e);
-        } finally {
-            setIsSubmitting(false);
-        }
-    };
+    const shiftsListOpt = masterOptions?.find(o => o.type === 'WORK_CONFIG' && o.key === 'MULTIPLE_SHIFTS_LIST');
+    const shiftsList = (shiftsListOpt?.label || '08:00, 08:30, 09:00')
+        .split(',')
+        .map(s => s.trim())
+        .filter(Boolean);
+
+    const registryItem = request ? getRegistryItem(request.type) : undefined;
+    const defaultCheckInTime = isFixedOt 
+        ? '00:00' 
+        : (parsed.time || parsed.targetShift || registryItem?.rules?.defaultTargetTime || shiftsList[0] || '08:30');
 
     return createPortal(
         <motion.div 
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 z-[110] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
+            className="fixed inset-0 z-[110] flex items-center justify-center bg-black/60 backdrop-blur-sm p-0 md:p-4"
             id="request-detail-modal-portal"
         >
             <motion.div
@@ -185,7 +246,7 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({
                     damping: 26, 
                     stiffness: 300 
                 }}
-                className="bg-white w-full max-w-lg lg:max-w-none lg:w-auto rounded-[2rem] shadow-2xl overflow-hidden border border-slate-100 flex flex-col max-h-[90vh]"
+                className="bg-white w-full h-full md:h-auto max-h-screen md:max-h-[90vh] rounded-none md:rounded-[2rem] lg:max-w-none lg:w-auto shadow-2xl overflow-hidden border border-slate-100 flex flex-col"
                 id="request-detail-modal-card"
             >
                 {/* Header Profile Panel */}
@@ -246,12 +307,8 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({
                                         originalStartTime={originalStartTime}
                                         originalEndTime={originalEndTime}
                                         originalOtHours={originalOtHours}
+                                        isFixed={isFixedOt}
                                     />
-                                )}
-
-                                {/* Attachment Preview (if any) */}
-                                {request.attachmentUrl && (
-                                    <AttachmentPreview attachmentUrl={request.attachmentUrl} />
                                 )}
 
                                 {/* Show Rejection Reason if already REJECTED */}
@@ -266,14 +323,24 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({
                                         </div>
                                     </div>
                                 )}
+
+                                {/* HP Penalty Adjustment Panel */}
+                                {request.status === 'PENDING' && shouldShowHpPenalty && (
+                                    <HpPenaltySection hpPenalty={hpPenalty} setHpPenalty={setHpPenalty} />
+                                )}
                             </div>
 
                             {/* Admin Action Footer (Only for PENDING status) */}
-                            {request.status === 'PENDING' && (
+                            {!isMobile && request && request.status === 'PENDING' && (
                                 <ActionFooter 
                                     isSubmitting={isSubmitting} 
                                     onApprove={handleApprove} 
                                     onReject={handleRejectSubmit} 
+                                    requestType={request.type}
+                                    defaultCheckInTime={defaultCheckInTime}
+                                    isProvisional={isProvisional}
+                                    initialRejectMode={initialRejectMode}
+                                    isFixed={isFixedOt}
                                 />
                             )}
                         </div>
@@ -289,11 +356,13 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({
                                     className="flex flex-col border-l border-slate-100 bg-slate-50/30 min-h-0 overflow-hidden shrink-0"
                                 >
                                     <div className="w-[380px] p-6 flex flex-col h-full min-h-0 shrink-0">
-                                        <div className="flex items-center gap-2 mb-4 shrink-0">
-                                            <History className="w-4 h-4 text-indigo-500" />
-                                            <h4 className="text-sm font-bold text-slate-800">ประวัติคำขอย้อนหลัง (Work History)</h4>
+                                        <div className="flex items-center justify-between w-full mb-4 shrink-0">
+                                            <div className="flex items-center gap-2 min-w-0">
+                                                <History className="w-4 h-4 text-indigo-500 shrink-0" />
+                                                <h4 className="text-sm font-bold text-slate-800 truncate">ประวัติคำขอย้อนหลัง</h4>
+                                            </div>
                                             {!isLoadingHistory && history.length > 0 && (
-                                                <span className="ml-auto text-xs bg-indigo-50 border border-indigo-100 text-indigo-600 px-2 py-1 rounded-full font-bold shadow-sm">
+                                                <span className="text-xs bg-indigo-50 border border-indigo-100 text-indigo-600 px-2.5 py-1 rounded-full font-bold shadow-sm shrink-0 whitespace-nowrap">
                                                     {history.length > 10 ? '10 ครั้งล่าสุด' : `${history.length} ครั้ง`}
                                                 </span>
                                             )}
@@ -320,7 +389,7 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({
                                 animate={{ rotateY: isMobileFlipped ? 180 : 0 }}
                                 transition={{ type: 'spring', damping: 24, stiffness: 120 }}
                                 style={{ transformStyle: 'preserve-3d' }}
-                                className="w-full flex-1 relative min-h-[390px] sm:min-h-[460px] h-[65vh] max-h-[580px]"
+                                className="w-full flex-1 relative min-h-[390px] sm:min-h-[460px] md:h-[65vh] md:max-h-[580px]"
                             >
                                 {/* FRONT FACE (Main request details) */}
                                 <div 
@@ -383,12 +452,8 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({
                                                 originalStartTime={originalStartTime}
                                                 originalEndTime={originalEndTime}
                                                 originalOtHours={originalOtHours}
+                                                isFixed={isFixedOt}
                                             />
-                                        )}
-
-                                        {/* Attachment Preview (if any) */}
-                                        {request.attachmentUrl && (
-                                            <AttachmentPreview attachmentUrl={request.attachmentUrl} />
                                         )}
 
                                         {/* Show Rejection Reason if already REJECTED */}
@@ -403,14 +468,24 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({
                                                 </div>
                                             </div>
                                         )}
+
+                                        {/* HP Penalty Adjustment Panel */}
+                                        {request.status === 'PENDING' && shouldShowHpPenalty && (
+                                            <HpPenaltySection hpPenalty={hpPenalty} setHpPenalty={setHpPenalty} />
+                                        )}
                                     </div>
 
                                     {/* Admin Action Footer (Only for PENDING status) */}
-                                    {request.status === 'PENDING' && (
+                                    {isMobile && request && request.status === 'PENDING' && (
                                         <ActionFooter 
                                             isSubmitting={isSubmitting} 
                                             onApprove={handleApprove} 
                                             onReject={handleRejectSubmit} 
+                                            requestType={request.type}
+                                            defaultCheckInTime={defaultCheckInTime}
+                                            isProvisional={isProvisional}
+                                            initialRejectMode={initialRejectMode}
+                                            isFixed={isFixedOt}
                                         />
                                     )}
                                 </div>

@@ -1,8 +1,17 @@
 
 import { User } from './core';
 
-export type WorkLocation = 'OFFICE' | 'WFH' | 'SITE' | 'LEAVE' | 'ABSENT';
-export type AttendanceStatus = 'WORKING' | 'COMPLETED' | 'ABSENT' | 'LATE' | 'LEAVE' | 'EARLY_LEAVE' | 'PENDING_VERIFY' | 'ACTION_REQUIRED' | 'ON_TIME' | 'NO_SHOW';
+export interface ShiftSlotResult {
+    targetStartTime: string;
+    isLate: boolean;
+    isRawLate?: boolean;
+    isBlocked: boolean;
+    isExceededLastShift?: boolean;
+    lateMinutes: number;
+}
+
+export type WorkLocation = 'OFFICE' | 'WFH' | 'SITE' | 'ONSITE' | 'LEAVE' | 'ABSENT';
+export type AttendanceStatus = 'WORKING' | 'COMPLETED' | 'ABSENT' | 'LATE' | 'LEAVE' | 'EARLY_LEAVE' | 'PENDING_VERIFY' | 'ACTION_REQUIRED' | 'ON_TIME' | 'NO_SHOW' | 'APPEAL';
 
 export interface LocationDef {
     id: string;
@@ -45,7 +54,7 @@ export interface AttendanceStats {
 
 // --- NEW: Leave Request Types (Updated) ---
 // Added 'WFH' to the union type
-export type LeaveType = 'SICK' | 'VACATION' | 'PERSONAL' | 'EMERGENCY' | 'LATE_ENTRY' | 'OVERTIME' | 'FORGOT_CHECKIN' | 'FORGOT_CHECKOUT' | 'FORGOT_BOTH' | 'WFH' | 'UNPAID';
+export type LeaveType = 'SICK' | 'VACATION' | 'PERSONAL' | 'EMERGENCY' | 'LATE_ENTRY' | 'OVERTIME' | 'FORGOT_CHECKIN' | 'FORGOT_CHECKOUT' | 'FORGOT_BOTH' | 'WFH' | 'UNPAID' | 'ONSITE' | 'OUT_OF_RANGE_CHECKOUT' | 'GPS_SPOOF_APPEAL' | 'EARLY_LEAVE';
 export type RequestStatus = 'PENDING' | 'APPROVED' | 'REJECTED';
 
 export interface LeaveRequest {
@@ -61,6 +70,8 @@ export interface LeaveRequest {
     createdAt: Date;
     rejectionReason?: string; // NEW: Added rejection reason
     user?: Partial<User>;
+    isFixed?: boolean;
+    is_fixed?: boolean;
 }
 
 // NEW: Helper type for Quota
@@ -86,6 +97,7 @@ export interface OtRequest {
     baseSalaryAtTime?: number;
     computedPayout: number;
     createdAt: Date;
+    isFixed?: boolean;
     user?: Partial<User>;
 }
 

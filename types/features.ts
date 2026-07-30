@@ -390,6 +390,8 @@ export interface AppNotification {
     title: string;
     message: string;
     taskId?: string;
+    relatedId?: string;
+    related_id?: string;
     date: Date;
     isRead: boolean;
     is_read?: boolean; // Raw database state (true if explicitly marked as read)
@@ -445,7 +447,7 @@ export interface MenuGroup {
     id: string;
     title: string;
     icon: any; 
-    items: { view: ViewMode; label: string; icon: any }[];
+    items: { view: ViewMode; label: string; icon: any; mobileLabel?: string }[];
     adminOnly?: boolean;
     totalBadge?: number; // Aggregated badge count
 }

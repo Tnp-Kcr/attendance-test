@@ -1,4 +1,3 @@
-import 'dotenv/config';
 import express from 'express';
 import cookieParser from 'cookie-parser';
 import cookieSession from 'cookie-session';
@@ -10,22 +9,25 @@ import driveRouter from './server/routes/drive.js';
 import tagsRouter from './server/routes/tags.js';
 import dashboardRouter from './server/routes/dashboard.js';
 import chatRouter from './server/routes/chat.js';
+import adminApprovalRouter from './server/routes/adminApproval.js';
 
 const PORT = 3000;
 const app = express();
 
-// Trust proxy is required for secure cookies behind a reverse proxy (like in AI Studio)
-app.set('trust proxy', 1);
+// Trust proxy is required for secure cookies behind a reverse proxy (like in AI Studio and Vercel)
+app.set('trust proxy', true);
+
+const isProd = process.env.NODE_ENV === 'production' || !!process.env.VERCEL;
 
 // Middleware
 app.use(express.json());
 app.use(cookieParser());
 app.use(cookieSession({
     name: 'session',
-    keys: ['juijui-planner-secret'],
-    maxAge: 24 * 60 * 60 * 1000, // 24 hours
-    secure: true, 
-    sameSite: 'none',
+    keys: [process.env.SESSION_SECRET || process.env.COOKIE_SECRET || 'juijui-planner-secret'],
+    maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+    secure: isProd, 
+    sameSite: 'lax',
     httpOnly: true 
 }));
 
@@ -35,10 +37,14 @@ app.use(driveRouter);
 app.use(tagsRouter);
 app.use(dashboardRouter);
 app.use(chatRouter);
+app.use(adminApprovalRouter);
 
 async function startServer() {
-    // Vite middleware for development
+    // โหลด dotenv เฉพาะเมื่อไม่ได้รันบน Vercel หรืออยู่ในสภาพแวดล้อม Development
     if (process.env.NODE_ENV !== 'production' && !process.env.VERCEL) {
+        const dotenv = await import('dotenv');
+        dotenv.config();
+
         const { createServer: createViteServer } = await import('vite');
         const vite = await createViteServer({
             server: { middlewareMode: true },

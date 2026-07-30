@@ -1,5 +1,6 @@
 import React from 'react';
 import { AttendanceLog } from '../../../../types/attendance';
+import { findPendingRegistryItemByNote, getWorkTypeStyles, WORK_TYPE_REGISTRY } from '../../../../constants/attendanceRegistry';
 import { format, isSameDay } from 'date-fns';
 import th from 'date-fns/locale/th';
 import { 
@@ -72,13 +73,38 @@ export const AttendanceRow: React.FC<AttendanceRowProps> = React.memo(({
         }
     }, [isHighlighted, onClearHighlight]);
 
+    const noteText = log.note || '';
+
+    // GPS Appeal check
+    const isGpsAppealApproved = noteText.includes('[APPROVED GPS_SPOOF_APPEAL]');
+    const isGpsAppealRejected = !isGpsAppealApproved && (noteText.includes('[REJECTED GPS_SPOOF_APPEAL]') || noteText.includes('[REJECTED_GPS_SPOOF_APPEAL]'));
+
     const late = isLate(log);
+    const pendingItem = findPendingRegistryItemByNote(log.note || '');
+    
+    // Check-in groups
+    const isForgotCheckInPending = pendingItem?.id === 'FORGOT_CHECKIN' || noteText.includes('[PROVISIONAL_FORGOT_CHECKIN]') || noteText.includes('[FORGOT_CHECKIN_PENDING]');
+    const isForgotBothPending = pendingItem?.id === 'FORGOT_BOTH' || noteText.includes('[FORGOT_BOTH_PENDING]');
+    const isLateEntryPending = pendingItem?.id === 'LATE_ENTRY' || noteText.includes('[PROVISIONAL_LATE]') || noteText.includes('[LATE_ENTRY_PENDING]');
+    
+    const isForgotCheckInApproved = noteText.includes('[APPROVED FORGOT_CHECKIN]');
+    const isForgotBothApproved = noteText.includes('[APPROVED FORGOT_BOTH]');
+    const isLateEntryApproved = noteText.includes('[APPROVED LATE_ENTRY]');
+    
+    const isForgotCheckInRejected = !isForgotCheckInApproved && noteText.includes('[REJECTED FORGOT_CHECKIN]');
+    const isForgotBothRejected = !isForgotBothApproved && noteText.includes('[REJECTED FORGOT_BOTH]');
+    const isLateEntryRejected = !isLateEntryApproved && noteText.includes('[REJECTED LATE_ENTRY]');
+
+    const isProvisionalLate = pendingItem?.id === 'LATE_ENTRY';
+    const isProvisionalGpsAppeal = (pendingItem?.id === 'GPS_SPOOF_APPEAL' || noteText.includes('[PROVISIONAL_GPS_SPOOF_APPEAL]') || noteText.includes('[GPS_SPOOF_APPEAL_PENDING]')) && !isGpsAppealApproved && !isGpsAppealRejected;
+    const isAppeal = log.status === 'APPEAL' || isProvisionalLate || isProvisionalGpsAppeal || isForgotCheckInPending || isForgotBothPending || isLateEntryPending;
     const proof = getProofUrl(log);
     const statusConfig = getStatusConfig(log, targetUser?.startDate ? new Date(targetUser.startDate) : undefined);
     const StatusIcon = statusConfig.icon;
     const isLeave = log.status === 'LEAVE' || log.workType === 'LEAVE';
     const isPending = log.status === 'PENDING_VERIFY';
     const isNotStarted = statusConfig.label === 'ยังไม่เริ่มงาน';
+    const workTypeStyles = getWorkTypeStyles(log.workType);
     
     // Check if it's a late correction (over 3 days)
     const isLateCorrection = log.status === 'ACTION_REQUIRED' && getWorkingDaysDifference(new Date(log.date), new Date(), holidays, exceptions, targetUser) > 3;
@@ -93,6 +119,21 @@ export const AttendanceRow: React.FC<AttendanceRowProps> = React.memo(({
         log.status !== 'ABSENT' && 
         log.status !== 'NO_SHOW' && 
         !isSameDay(new Date(log.date), new Date());
+
+    // 1. กลุ่มคำขอ กลับก่อนเวลา (EARLY_LEAVE)
+    const isEarlyLeavePending = pendingItem?.id === 'EARLY_LEAVE' || (noteText.includes('[PROVISIONAL_CHECKOUT]') && noteText.includes('[EARLY:')) || noteText.includes('[EARLY_LEAVE_PENDING]');
+    const isEarlyLeaveAccept = noteText.includes('[ACCEPT_PENALTY]');
+    const isEarlyLeaveRejected = noteText.includes('[REJECTED EARLY_LEAVE_APPEAL]');
+    
+    // 2. กลุ่มคำขอ ลงเวลานอกพื้นที่ (OUT_OF_RANGE_CHECKOUT)
+    const isOutOfRangeApproved = noteText.includes('[APPROVED OUT_OF_RANGE_CHECKOUT]');
+    const isOutOfRangeRejected = !isOutOfRangeApproved && noteText.includes('[REJECTED OUT_OF_RANGE_CHECKOUT]');
+    const isOutOfRangePending = pendingItem?.id === 'OUT_OF_RANGE_CHECKOUT' || (noteText.includes('[PROVISIONAL_CHECKOUT]') && noteText.includes('(Location Mismatch)')) || noteText.includes('[OUT_OF_RANGE_CHECKOUT_PENDING]');
+    
+    // 3. กลุ่มคำขอ ลืมเช็คเอาท์ (FORGOT_CHECKOUT)
+    const isForgotCheckOutApproved = noteText.includes('[APPROVED FORGOT_CHECKOUT]');
+    const isForgotCheckOutRejected = !isForgotCheckOutApproved && noteText.includes('[REJECTED FORGOT_CHECKOUT]');
+    const isForgotCheckOutPending = pendingItem?.id === 'FORGOT_CHECKOUT' || (noteText.includes('[PROVISIONAL_CHECKOUT]') && !noteText.includes('[EARLY:') && !noteText.includes('(Location Mismatch)')) || noteText.includes('[FORGOT_CHECKOUT_PENDING]');
 
     return (
         <tr 
@@ -140,15 +181,145 @@ export const AttendanceRow: React.FC<AttendanceRowProps> = React.memo(({
             </td>
             <td className="px-6 py-4">
                 {log.checkInTime ? (
-                    <span className={`font-mono font-bold text-sm ${late ? 'text-red-500' : 'text-green-600'}`}>
-                        {format(log.checkInTime, 'HH:mm')}
-                        {late && <span className="ml-2 text-[9px] bg-red-100 px-1.5 py-0.5 rounded text-red-600 uppercase">LATE</span>}
+                    <div>
+                        <span className={`font-mono font-semibold text-sm ${isGpsAppealApproved ? 'text-emerald-600' : isGpsAppealRejected ? 'text-rose-600' : isProvisionalGpsAppeal ? 'text-rose-600' : isAppeal ? 'text-violet-600' : late ? 'text-red-500' : 'text-emerald-600'}`}>
+                            {format(log.checkInTime, 'HH:mm')}
+                            {isGpsAppealApproved ? (
+                                <span className="ml-2 text-[9px] bg-emerald-100 font-bold px-1.5 py-0.5 rounded text-emerald-700 uppercase border border-emerald-200">🟢 GPS APPROVED</span>
+                            ) : isGpsAppealRejected ? (
+                                <span className="ml-2 text-[9px] bg-rose-100 font-bold px-1.5 py-0.5 rounded text-rose-700 uppercase border border-rose-200">🔴 REJECTED GPS</span>
+                            ) : isProvisionalGpsAppeal ? (
+                                <span className="ml-2 text-[9px] bg-rose-100 font-bold px-1.5 py-0.5 rounded text-rose-700 uppercase border border-rose-200">🚨 GPS จำลอง</span>
+                            ) : isLateEntryPending ? (
+                                <span className="ml-2 text-[9px] bg-amber-100 font-bold px-1.5 py-0.5 rounded text-amber-700 uppercase border border-amber-200">🟠 PENDING LATE</span>
+                            ) : isForgotCheckInPending ? (
+                                <span className="ml-2 text-[9px] bg-amber-100 font-bold px-1.5 py-0.5 rounded text-amber-700 uppercase border border-amber-200">🟠 PENDING</span>
+                            ) : isForgotBothPending ? (
+                                <span className="ml-2 text-[9px] bg-amber-100 font-bold px-1.5 py-0.5 rounded text-amber-700 uppercase border border-amber-200">🟠 PENDING</span>
+                            ) : isForgotCheckInApproved || isForgotBothApproved ? (
+                                <span className="ml-2 text-[9px] bg-emerald-100 font-bold px-1.5 py-0.5 rounded text-emerald-700 uppercase border border-emerald-200">🟢 APPROVED</span>
+                            ) : isLateEntryApproved ? (
+                                <span className="ml-2 text-[9px] bg-emerald-100 font-bold px-1.5 py-0.5 rounded text-emerald-700 uppercase border border-emerald-200">🟢 APPROVED LATE</span>
+                            ) : isForgotCheckInRejected || isForgotBothRejected ? (
+                                <span className="ml-2 text-[9px] bg-rose-100 font-bold px-1.5 py-0.5 rounded text-rose-700 uppercase border border-rose-200">🔴 REJECTED</span>
+                            ) : isLateEntryRejected ? (
+                                <span className="ml-2 text-[9px] bg-rose-100 font-bold px-1.5 py-0.5 rounded text-rose-700 uppercase border border-rose-200">🔴 REJECTED LATE</span>
+                            ) : isAppeal ? (
+                                <span className="ml-2 text-[9px] bg-violet-100 font-medium px-1.5 py-0.5 rounded text-violet-700 uppercase">APPEAL</span>
+                            ) : null}
+                            {!isAppeal && !isGpsAppealApproved && late && <span className="ml-2 text-[9px] bg-red-100 font-medium px-1.5 py-0.5 rounded text-red-700 uppercase">LATE</span>}
+                        </span>
+                        {(() => {
+                            const matchShift = log.note?.match(/\[TARGET_SHIFT:([^\]]+)\]/) || log.note?.match(/\[TIME:([0-9]{2}:[0-9]{2})\]/);
+                            const matchActual = log.note?.match(/\[ACTUAL_CHECK_IN:([^\]]+)\]/);
+                            if (!matchShift) return null;
+                            
+                            const shiftTimeStr = matchShift[1];
+                            let actualTimeStr = '';
+                            if (matchActual && matchActual[1]) {
+                                const parts = matchActual[1].split(':');
+                                if (parts.length >= 2) {
+                                    actualTimeStr = `${parts[0]}:${parts[1]}`;
+                                } else {
+                                    actualTimeStr = matchActual[1];
+                                }
+                            }
+
+                            return (
+                                <div className="space-y-0.5 mt-1">
+                                    <span className="inline-flex items-center gap-1 text-[10px] text-teal-700 font-semibold bg-teal-50 px-2 py-0.5 rounded-md border border-teal-200/70 w-fit">
+                                        <span className="w-1.5 h-1.5 rounded-full bg-teal-500"></span>
+                                        กะ {shiftTimeStr} น.
+                                    </span>
+                                    {actualTimeStr && (
+                                        <span className="block text-[10px] text-slate-400 font-medium italic">
+                                            (กดจริง {actualTimeStr} น.)
+                                        </span>
+                                    )}
+                                </div>
+                            );
+                        })()}
+                    </div>
+                ) : (isLeave || isNotStarted) ? (
+                    <span className="text-xs text-gray-400">-</span>
+                ) : isForgotCheckInPending || isForgotBothPending || isLateEntryPending ? (
+                    <span className="text-amber-500 italic text-xs font-bold flex items-center gap-1">
+                        <Loader2 className="w-3 h-3 animate-spin"/> รออนุมัติ ({isForgotBothPending ? 'เข้า-ออก' : isForgotCheckInPending ? 'ลืมเข้า' : 'แจ้งสาย'})
                     </span>
-                ) : (isLeave || isNotStarted) ? <span className="text-xs text-gray-400">-</span> : <span className="text-gray-300 text-xs">--:--</span>}
+                ) : isForgotCheckInRejected || isForgotBothRejected || isLateEntryRejected ? (
+                    <span className="text-red-500 text-xs font-bold flex items-center gap-1 bg-red-50 px-2.5 py-1 rounded-lg border border-red-100 w-fit">
+                        <XCircle className="w-3.5 h-3.5" /> ปฏิเสธ ({isForgotBothRejected ? 'เข้า-ออก' : isForgotCheckInRejected ? 'ลืมเข้า' : 'สาย'})
+                    </span>
+                ) : (
+                    <span className="text-gray-300 text-xs">--:--</span>
+                )}
             </td>
             <td className="px-6 py-4">
                 {log.checkOutTime ? (
-                    <span className="font-mono font-bold text-sm text-gray-600">{format(log.checkOutTime, 'HH:mm')}</span>
+                    <div className="flex flex-col sm:flex-row sm:items-center gap-1.5 flex-wrap">
+                        <span className="font-mono font-bold text-sm text-gray-600">
+                            {format(log.checkOutTime, 'HH:mm')}
+                        </span>
+                        
+                        {/* 1. กลับก่อนเวลาอุทธรณ์ */}
+                        {isEarlyLeavePending && (
+                            <span className="text-[9px] font-bold bg-amber-50 text-amber-600 border border-amber-200 px-1.5 py-0.5 rounded uppercase tracking-wide">
+                                🟠 APPEAL
+                            </span>
+                        )}
+                        {/* 2. นอกพื้นที่อุทธรณ์ */}
+                        {isOutOfRangePending && (
+                            <span className="text-[9px] font-bold bg-violet-50 text-violet-600 border border-violet-200 px-1.5 py-0.5 rounded uppercase tracking-wide">
+                                🟣 OUT OF RANGE
+                            </span>
+                        )}
+                        {/* 3. ลืมออกอุทธรณ์ */}
+                        {isForgotCheckOutPending && (
+                            <span className="text-[9px] font-bold bg-yellow-50 text-yellow-600 border border-yellow-200 px-1.5 py-0.5 rounded uppercase tracking-wide">
+                                🟡 FORGOT
+                            </span>
+                        )}
+                        
+                        {/* 4. นอกพื้นที่อนุมัติผ่าน */}
+                        {isOutOfRangeApproved && (
+                            <span className="text-[9px] font-bold bg-emerald-50 text-emerald-600 border border-emerald-200 px-1.5 py-0.5 rounded uppercase tracking-wide">
+                                🟢 GPS APPROVED
+                            </span>
+                        )}
+                        {/* 5. แก้เวลาลืมออกอนุมัติผ่าน */}
+                        {(isForgotCheckOutApproved || isForgotBothApproved) && (
+                            <span className="text-[9px] font-bold bg-emerald-50 text-emerald-600 border border-emerald-200 px-1.5 py-0.5 rounded uppercase tracking-wide">
+                                🟢 APPROVED
+                            </span>
+                        )}
+                        
+                        {/* 6. กลับก่อนเวลา (ตัดแต้ม/ปฏิเสธ) */}
+                        {(isEarlyLeaveAccept || isEarlyLeaveRejected) && (
+                            <span className="text-[9px] font-bold bg-rose-50 text-rose-600 border border-rose-200 px-1.5 py-0.5 rounded uppercase tracking-wide">
+                                🔴 EARLY
+                            </span>
+                        )}
+                        {/* 7. นอกพื้นที่โดนปฏิเสธ */}
+                        {isOutOfRangeRejected && (
+                            <span className="text-[9px] font-bold bg-red-50 text-red-600 border border-red-200 px-1.5 py-0.5 rounded uppercase tracking-wide">
+                                🔴 REJECTED GPS
+                            </span>
+                        )}
+                        {/* 8. ลืมออกโดนปฏิเสธ */}
+                        {(isForgotCheckOutRejected || isForgotBothRejected) && (
+                            <span className="text-[9px] font-bold bg-red-50 text-red-600 border border-red-200 px-1.5 py-0.5 rounded uppercase tracking-wide">
+                                🔴 REJECTED
+                            </span>
+                        )}
+                    </div>
+                ) : isEarlyLeavePending || isOutOfRangePending || isForgotCheckOutPending || isForgotBothPending ? (
+                    <span className="text-amber-500 italic text-xs font-bold flex items-center gap-1">
+                        <Loader2 className="w-3.5 h-3.5 animate-spin"/> รออนุมัติ ({isForgotBothPending ? 'เข้า-ออก' : isEarlyLeavePending ? 'กลับก่อน' : isOutOfRangePending ? 'นอกพื้นที่' : 'ลืมออก'})
+                    </span>
+                ) : isEarlyLeaveRejected || isOutOfRangeRejected || isForgotCheckOutRejected || isForgotBothRejected ? (
+                    <span className="text-red-500 text-xs font-bold flex items-center gap-1 bg-red-50 px-2.5 py-1 rounded-lg border border-red-100 w-fit">
+                        <XCircle className="w-3.5 h-3.5" /> ปฏิเสธ ({isForgotBothRejected ? 'เข้า-ออก' : isEarlyLeaveRejected ? 'กลับก่อน' : isOutOfRangeRejected ? 'นอกพื้นที่' : 'ลืมออก'})
+                    </span>
                 ) : isPending ? (
                     <span className="text-orange-500 italic text-xs font-bold flex items-center gap-1"><Loader2 className="w-3 h-3 animate-spin"/> รออนุมัติ</span>
                 ) : (isLeave || isNotStarted) ? (
@@ -167,19 +338,12 @@ export const AttendanceRow: React.FC<AttendanceRowProps> = React.memo(({
             </td>
             <td className="px-6 py-4">
                 <div className="flex flex-col gap-1">
-                    <span className={`text-[10px] font-bold px-2 py-1 rounded-lg border uppercase tracking-wide w-fit ${
-                        log.workType === 'OFFICE' ? 'bg-indigo-50 text-indigo-600 border-indigo-100' :
-                        log.workType === 'WFH' ? 'bg-blue-50 text-blue-600 border-blue-100' :
-                        log.workType === 'LEAVE' ? 'bg-sky-50 text-sky-600 border-sky-100' :
-                        'bg-orange-50 text-orange-600 border-orange-100'
-                    }`}>
-                        {log.workType}
+                    <span className={`text-[10px] font-bold px-2 py-1 rounded-lg border uppercase tracking-wide w-fit ${workTypeStyles.bg} ${workTypeStyles.text} ${workTypeStyles.border}`}>
+                        {WORK_TYPE_REGISTRY[log.workType]?.label || log.workType}
                     </span>
-                    {!isLeave && (
-                        <span className="text-xs text-gray-500 truncate max-w-[120px]" title={getLocationDisplay(log)}>
-                            {getLocationDisplay(log)}
-                        </span>
-                    )}
+                    <span className={`text-xs text-gray-500 truncate max-w-[120px] ${isLeave ? 'italic font-medium text-slate-500' : ''}`} title={getLocationDisplay(log)}>
+                        {getLocationDisplay(log)}
+                    </span>
                 </div>
             </td>
             <td className="px-6 py-4 text-center">

@@ -9,6 +9,7 @@ import { MENU_GROUPS } from '../components/Sidebar';
 import PendingApprovalScreen from '../components/PendingApprovalScreen';
 import InactiveScreen from '../components/InactiveScreen';
 import DeathScreen from '../components/gamification/DeathScreen';
+import { MissingProfileScreen } from '../components/auth/MissingProfileScreen';
 import AppShell from '../components/layout/AppShell';
 import { useTaskManager } from '../hooks/useTaskManager';
 import { useAuth } from '../hooks/useAuth';
@@ -21,6 +22,7 @@ import { useToast } from '../context/ToastContext';
 import ShortcutManager from '../components/common/ShortcutManager';
 import { Loader2 } from 'lucide-react';
 import { useWorkboxContext } from '../context/WorkboxContext';
+import { BRAND_CONFIG } from '../config/brand';
 import WorkboxPanel from '../components/workbox/WorkboxPanel';
 import WorkboxTrigger from '../components/workbox/WorkboxTrigger';
 
@@ -78,6 +80,7 @@ const AppRouterInner: React.FC<AppRouterProps> = ({ user }) => {
   const [isNotifSettingsOpen, setIsNotifSettingsOpen] = useState(false);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false); 
   const [isChatAssistantOpen, setIsChatAssistantOpen] = useState(false);
+  const [activeDetailNotif, setActiveDetailNotif] = useState<any | null>(null);
 
   // --- PWA SHARE INTENT RECEIVER ---
   const [pwaSharedData, setPwaSharedData] = useState<any>(null);
@@ -275,7 +278,7 @@ const AppRouterInner: React.FC<AppRouterProps> = ({ user }) => {
   }, [searchParams, location.pathname, defaultView]);
 
   // --- NAVIGATION HANDLER (Sync with URL - Enhanced with fluid cosmic portals) ---
-  const handleNavigate = useCallback((view: ViewMode) => {
+  const handleNavigate = useCallback((view: ViewMode, queryParams?: Record<string, string>) => {
       const isDimensionJump = (currentView === 'ULTIMATE_WORKROOM') || (view === 'ULTIMATE_WORKROOM');
 
       if (isDimensionJump && globalWarpStage === 'IDLE') {
@@ -298,6 +301,23 @@ const AppRouterInner: React.FC<AppRouterProps> = ({ user }) => {
                       next.delete('scriptId');
                       next.delete('q');
                       next.delete('deep');
+                      next.delete('origin');
+                  }
+                  if (view !== 'ATTENDANCE') {
+                      next.delete('tab');
+                      next.delete('highlightReqId');
+                      next.delete('id');
+                      next.delete('reqId');
+                      next.delete('leaveId');
+                  }
+                  if (queryParams) {
+                      Object.entries(queryParams).forEach(([key, val]) => {
+                          if (val) {
+                              next.set(key, val);
+                          } else {
+                              next.delete(key);
+                          }
+                      });
                   }
                   return next;
               }, { replace: true });
@@ -322,15 +342,86 @@ const AppRouterInner: React.FC<AppRouterProps> = ({ user }) => {
                   next.delete('scriptId');
                   next.delete('q');
                   next.delete('deep');
+                  next.delete('origin');
+              }
+              if (view !== 'ATTENDANCE') {
+                  next.delete('tab');
+                  next.delete('highlightReqId');
+                  next.delete('id');
+                  next.delete('reqId');
+                  next.delete('leaveId');
+              }
+              if (queryParams) {
+                  Object.entries(queryParams).forEach(([key, val]) => {
+                      if (val) {
+                          next.set(key, val);
+                      } else {
+                          next.delete(key);
+                      }
+                  });
               }
               return next;
           }, { replace: true });
       }
   }, [currentView, globalWarpStage, playWarpSound, setSearchParams]);
 
+  // --- DEEP LINK RESTORE FROM SESSIONSTORAGE ---
+  useEffect(() => {
+    if (isManagerLoading) return;
+
+    const pendingDeepLink = sessionStorage.getItem('juijui_pending_deep_link');
+    if (pendingDeepLink) {
+      sessionStorage.removeItem('juijui_pending_deep_link');
+      const params = new URLSearchParams(pendingDeepLink);
+      const targetView = params.get('view') as ViewMode;
+      if (targetView) {
+        // Check if the current search parameters are already identical to the deep link parameters
+        let isIdentical = true;
+        const targetMap = new Map<string, string>();
+        params.forEach((val, key) => {
+          if (key !== 'openExternalBrowser') {
+            targetMap.set(key, val);
+          }
+        });
+
+        const currentMap = new Map<string, string>();
+        searchParams.forEach((val, key) => {
+          currentMap.set(key, val);
+        });
+
+        if (targetMap.size !== currentMap.size) {
+          isIdentical = false;
+        } else {
+          for (const [key, val] of targetMap.entries()) {
+            if (currentMap.get(key) !== val) {
+              isIdentical = false;
+              break;
+            }
+          }
+        }
+
+        if (isIdentical) {
+          console.log("Deep link restoration skipped: already identical to current URL.");
+        } else {
+          const queryObj: Record<string, string> = {};
+          params.forEach((val, key) => {
+            if (key !== 'view' && key !== 'openExternalBrowser') {
+              queryObj[key] = val;
+            }
+          });
+          handleNavigate(targetView, queryObj);
+        }
+      }
+    }
+  }, [isManagerLoading, handleNavigate, searchParams]);
+
   // Sync URL with default view - Enhanced stability with custom member redirect
   useEffect(() => {
+    // Prevent redirecting before metadata and masterOptions are loaded
+    if (isManagerLoading) return;
+
     const view = searchParams.get('view');
+    
     // If we are at root and no view is set, determine default view
     if (!view && location.pathname === '/' && defaultView) {
       setSearchParams((next: any) => {
@@ -339,8 +430,17 @@ const AppRouterInner: React.FC<AppRouterProps> = ({ user }) => {
         next.set('view', defaultView);
         return next;
       }, { replace: true });
+      return;
     }
-  }, [location.pathname, searchParams, setSearchParams, defaultView]);
+
+    // If a view is specified in URL but it is NOT allowed, redirect to default view!
+    if (view && allowedViews.length > 0 && !allowedViews.includes(view)) {
+      setSearchParams((next: any) => {
+        next.set('view', defaultView);
+        return next;
+      }, { replace: true });
+    }
+  }, [location.pathname, searchParams, setSearchParams, defaultView, isManagerLoading, allowedViews]);
 
   // --- TASK OPENER (Robust ID Resolution) ---
   const handleOpenTaskById = useCallback(async (taskOrId: any, currentViewMode?: string) => {
@@ -399,9 +499,9 @@ const AppRouterInner: React.FC<AppRouterProps> = ({ user }) => {
   // --- GLOBAL KEYBOARD SHORTCUTS REMOVED (Moved to ShortcutManager) ---
 
   // --- DETECT LOCK NOTIFICATION ---
-  const negligenceNotification = notifications.find(n => n.type === 'NEGLIGENCE' && !n.isRead);
-  const deathWarningNotification = notifications.find(n => n.type === 'DEATH_WARNING' && !n.isRead);
-  const resurrectionNotification = notifications.find(n => n.type === 'RESURRECTION' && !n.isRead);
+  const negligenceNotification = BRAND_CONFIG.gamificationMode === 2 ? undefined : notifications.find(n => n.type === 'NEGLIGENCE' && !n.isRead);
+  const deathWarningNotification = BRAND_CONFIG.gamificationMode === 2 ? undefined : notifications.find(n => n.type === 'DEATH_WARNING' && !n.isRead);
+  const resurrectionNotification = BRAND_CONFIG.gamificationMode === 2 ? undefined : notifications.find(n => n.type === 'RESURRECTION' && !n.isRead);
 
   const handleToggleNotification = () => {
       // Changed: Do NOT mark as viewed immediately upon opening
@@ -442,18 +542,18 @@ const AppRouterInner: React.FC<AppRouterProps> = ({ user }) => {
   }
 
   if (!currentUserProfile) {
-     return <div className="p-10 text-center text-gray-500">ไม่พบข้อมูลโปรไฟล์ผู้ใช้ (User Profile Not Found)</div>;
+     return <MissingProfileScreen onLogout={handleForceLogout} />;
   }
   
   if (!currentUserProfile.isApproved) {
     return <PendingApprovalScreen user={currentUserProfile} onLogout={handleForceLogout} />;
   }
 
-  if (currentUserProfile.status === 'DEATH') {
+  if (currentUserProfile.status === 'DEATH' && BRAND_CONFIG.gamificationMode !== 2) {
     return <DeathScreen user={currentUserProfile} onLogout={handleForceLogout} />;
   }
 
-  if (!currentUserProfile.isActive) {
+  if (!currentUserProfile.isActive && BRAND_CONFIG.gamificationMode !== 2) {
     return <InactiveScreen user={currentUserProfile} onLogout={handleForceLogout} />;
   }
 
@@ -651,6 +751,8 @@ const AppRouterInner: React.FC<AppRouterProps> = ({ user }) => {
         approveRequest={approveRequest}
         rejectRequest={rejectRequest}
         leaveRequests={leaveRequests}
+        activeDetailNotif={activeDetailNotif}
+        setActiveDetailNotif={setActiveDetailNotif}
       />
 
       {/* --- GLOBAL HIGH-FIDELITY DIMENSIONAL WARP GATE OVERLAY --- */}

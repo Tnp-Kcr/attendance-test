@@ -1,13 +1,22 @@
 import express from 'express';
 import { SCOPES, getGoogleOAuthClient } from '../utils/google-client.js';
+import { serverSupabase } from '../utils/supabase.js';
 
 const router = express.Router();
 
 // 1. Google Auth URL generator
 router.get('/api/auth/google/url', (req, res) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
     try {
-        if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET) {
-            throw new Error('Google Client ID or Secret is missing');
+        const clientId = process.env.GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID;
+        const clientSecret = process.env.GOOGLE_CLIENT_SECRET || process.env.VITE_GOOGLE_CLIENT_SECRET;
+
+        if (!clientId || !clientSecret) {
+            return res.status(400).json({ 
+                error: 'กรุณาตั้งค่า GOOGLE_CLIENT_ID และ GOOGLE_CLIENT_SECRET ใน Environment Variables' 
+            });
         }
         
         const localOauthClient = getGoogleOAuthClient(req);
@@ -26,32 +35,64 @@ router.get('/api/auth/google/url', (req, res) => {
 
 // 2. Google Session Connection Status
 router.get('/api/auth/google/status', (req, res) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
     const tokens = (req.session as any)?.tokens;
     res.json({ connected: !!tokens });
 });
 
 // 3. Get Active/Refreshed Access Token
 router.get('/api/auth/google/token', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
     const tokens = (req.session as any)?.tokens;
-    if (!tokens) return res.status(401).json({ error: 'Not connected' });
+    if (!tokens || !tokens.access_token) return res.status(401).json({ error: 'Not connected' });
     
     try {
         const localAuthClient = getGoogleOAuthClient(req);
         localAuthClient.setCredentials(tokens);
         const { token } = await localAuthClient.getAccessToken();
         
-        // Update session with potentially refreshed tokens
-        (req.session as any).tokens = localAuthClient.credentials;
+        // Update session with compact refreshed credentials (avoid exceeding 4KB cookie limit)
+        if (localAuthClient.credentials) {
+            (req.session as any).tokens = {
+                access_token: localAuthClient.credentials.access_token || tokens.access_token,
+                refresh_token: localAuthClient.credentials.refresh_token || tokens.refresh_token,
+                expiry_date: localAuthClient.credentials.expiry_date || tokens.expiry_date,
+                token_type: localAuthClient.credentials.token_type || tokens.token_type || 'Bearer'
+            };
+        }
         
         res.json({ accessToken: token });
     } catch (error) {
         console.error('Error refreshing token:', error);
-        res.status(500).json({ error: 'Failed to refresh token' });
+        if (req.session) {
+            (req.session as any).tokens = null;
+        }
+        res.status(401).json({ error: 'Failed to refresh token' });
     }
 });
 
-// 4. Google Callback Handler
+// 4. Google Session Logout
+router.post('/api/auth/google/logout', (req, res) => {
+    try {
+        if (req.session) {
+            (req.session as any).tokens = null;
+        }
+        res.json({ success: true, message: 'Logged out successfully' });
+    } catch (error: any) {
+        res.status(500).json({ error: error.message || 'Logout failed' });
+    }
+});
+
+// 5. Google Callback Handler
 router.get('/auth/google/callback', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    
     const { code } = req.query;
     console.log('Received auth callback with code:', !!code);
     
@@ -60,13 +101,12 @@ router.get('/auth/google/callback', async (req, res) => {
         const { tokens } = await localOauthClient.getToken(code as string);
         console.log('Successfully obtained tokens');
 
-        // Store necessary tokens in session
+        // Store compact token object in session to comply strictly with <4KB cookie limits on Serverless
         (req.session as any).tokens = {
             access_token: tokens.access_token,
             refresh_token: tokens.refresh_token,
             expiry_date: tokens.expiry_date,
-            token_type: tokens.token_type,
-            scope: tokens.scope
+            token_type: tokens.token_type || 'Bearer'
         };
         
         res.send(`
@@ -88,20 +128,24 @@ router.get('/auth/google/callback', async (req, res) => {
                         <h2>Connected!</h2>
                         <p>Google Drive has been successfully connected. This window will close automatically.</p>
                         <script>
-                            // Handle Success
+                            // Handle Success via postMessage & dual LocalStorage fallback for COOP scenarios
                             const notifyAndClose = () => {
+                                const now = Date.now().toString();
+                                try {
+                                    localStorage.setItem('GOOGLE_AUTH_SUCCESS_DATA', JSON.stringify({ status: 'SUCCESS', time: now }));
+                                    localStorage.setItem('GOOGLE_AUTH_TIMESTAMP', now);
+                                } catch (e) {
+                                    console.error("localStorage failed", e);
+                                }
+
                                 if (window.opener) {
                                     try {
-                                        window.opener.postMessage({ type: 'GOOGLE_AUTH_SUCCESS' }, '*');
+                                        window.opener.postMessage({ type: 'GOOGLE_AUTH_SUCCESS', timestamp: now }, '*');
                                     } catch (e) {
                                         console.error("postMessage failed", e);
                                     }
                                 }
-                                try {
-                                    localStorage.setItem('GOOGLE_AUTH_TIMESTAMP', Date.now().toString());
-                                } catch (e) {
-                                    console.error("localStorage failed", e);
-                                }
+
                                 setTimeout(() => { window.close(); }, 500);
                             };
                             notifyAndClose();
@@ -120,6 +164,45 @@ router.get('/auth/google/callback', async (req, res) => {
                 <button onclick="window.close()" style="padding: 8px 16px; background: #64748b; color: white; border: none; border-radius: 6px; cursor: pointer;">Close Window</button>
             </div>
         `);
+    }
+});
+
+// Route to securely update user email by bypassing old domain restrictions (like juijui.local) using the admin SDK
+router.post('/api/auth/update-email', async (req, res) => {
+    try {
+        const authHeader = req.headers.authorization;
+        if (!authHeader || !authHeader.startsWith('Bearer ')) {
+            return res.status(401).json({ error: 'ไม่พบข้อมูลสิทธิ์การใช้งาน (Authorization header)' });
+        }
+        
+        const token = authHeader.split(' ')[1];
+        const { data: { user }, error: authError } = await serverSupabase.auth.getUser(token);
+        if (authError || !user) {
+            return res.status(401).json({ error: 'เซสชันหมดอายุหรือสิทธิ์ไม่ถูกต้อง: ' + (authError?.message || 'Invalid token') });
+        }
+        
+        const { email } = req.body;
+        if (!email || !email.trim()) {
+            return res.status(400).json({ error: 'กรุณากรอกอีเมล' });
+        }
+        
+        const cleanEmail = email.trim().toLowerCase();
+        
+        // Use admin client to update user email directly and bypass verification on the old invalid domain
+        const { data: updatedUser, error: updateError } = await serverSupabase.auth.admin.updateUserById(
+            user.id,
+            { email: cleanEmail, email_confirm: true }
+        );
+        
+        if (updateError) {
+            console.error('Failed to update email via admin client:', updateError);
+            return res.status(500).json({ error: updateError.message });
+        }
+        
+        res.json({ success: true, user: updatedUser });
+    } catch (error: any) {
+        console.error('Error in update-email endpoint:', error);
+        res.status(500).json({ error: error.message || 'เกิดข้อผิดพลาดในการอัปเดตอีเมล' });
     }
 });
 

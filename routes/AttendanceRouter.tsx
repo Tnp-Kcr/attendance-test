@@ -1,6 +1,7 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { useSearchParams } from 'react-router-dom';
 import { User } from '../types';
 import { 
     AttendanceWidget, 
@@ -18,6 +19,7 @@ import { useAttendanceAlerts } from '../hooks/attendance/useAttendanceAlerts';
 import { useMasterData } from '../hooks/useMasterData';
 import { Clock, Calendar, PieChart, FileCheck, TableProperties } from 'lucide-react';
 import AppBackground, { BackgroundTheme } from '../components/common/AppBackground';
+import { BRAND_CONFIG } from '../config/brand';
 
 interface AttendanceRouterProps {
     currentUser: User;
@@ -26,8 +28,48 @@ interface AttendanceRouterProps {
 
 type AttendanceTab = 'CHECK_IN' | 'HISTORY' | 'TIMESHEET' | 'REPORT' | 'APPROVALS';
 
+const parseTabParam = (param: string | null, highlightReqId?: string | null, userRole?: string): AttendanceTab => {
+    let resolvedTab: AttendanceTab = 'CHECK_IN';
+
+    if (!param) {
+        resolvedTab = highlightReqId ? 'HISTORY' : 'CHECK_IN';
+    } else if (['CHECK_IN', 'HISTORY', 'TIMESHEET', 'REPORT', 'APPROVALS'].includes(param)) {
+        resolvedTab = param as AttendanceTab;
+    } else if (param === 'leave-requests' || param === 'ot-requests' || param === 'approvals' || param === 'approval') {
+        resolvedTab = 'APPROVALS';
+    } else if (param === 'my-requests' || param === 'my-history' || param === 'history') {
+        resolvedTab = 'HISTORY';
+    }
+
+    // Fallback: If non-ADMIN tries to open APPROVALS tab (e.g. tab=leave-requests), redirect them to HISTORY
+    if (resolvedTab === 'APPROVALS' && userRole && userRole !== 'ADMIN') {
+        return 'HISTORY';
+    }
+
+    // Fallback: If ADMIN in mode 2 tries to open CHECK_IN or HISTORY, redirect to TIMESHEET
+    if (userRole === 'ADMIN' && BRAND_CONFIG.adminAttendanceTabsMode === 2 && (resolvedTab === 'CHECK_IN' || resolvedTab === 'HISTORY')) {
+        return 'TIMESHEET';
+    }
+
+    return resolvedTab;
+};
+
 const AttendanceRouter: React.FC<AttendanceRouterProps> = ({ currentUser, users }) => {
-    const [currentTab, setCurrentTab] = useState<AttendanceTab>('CHECK_IN');
+    const [searchParams, setSearchParams] = useSearchParams();
+    
+    // Derived State from URL searchParams (Single Source of Truth)
+    const currentTab = useMemo(() => {
+        return parseTabParam(searchParams.get('tab'), searchParams.get('highlightReqId') || searchParams.get('id'), currentUser?.role);
+    }, [searchParams, currentUser?.role]);
+
+    const selectTab = (tab: AttendanceTab) => {
+        setSearchParams(prev => {
+            const next = new URLSearchParams(prev);
+            next.set('tab', tab);
+            return next;
+        }, { replace: true });
+    };
+
     const [isQuotaOpen, setIsQuotaOpen] = useState(false); 
     const [highlightedDate, setHighlightedDate] = useState<string | null>(null);
     
@@ -43,8 +85,15 @@ const AttendanceRouter: React.FC<AttendanceRouterProps> = ({ currentUser, users 
 
     // Lift state up: Fetch all requests here so we can pass actions to child
     // If Admin, fetch all requests for the approval list
-    const { requests, leaveUsage, isLoading: isRequestsLoading, isLoadingHistorical,approveRequest, rejectRequest,fetchRequestsForRange} = useLeaveRequests(
-        
+    const { 
+        requests, 
+        leaveUsage, 
+        isLoading: isRequestsLoading, 
+        isLoadingHistorical,
+        approveRequest, 
+        rejectRequest,
+        fetchRequestsForRange
+    } = useLeaveRequests(
         currentUser, 
         { all: currentUser.role === 'ADMIN' }
     );
@@ -91,53 +140,59 @@ const AttendanceRouter: React.FC<AttendanceRouterProps> = ({ currentUser, users 
                 {/* Navigation Tabs & Actions */}
                 <div className="flex flex-wrap items-center gap-3">
                     <div className="flex p-1 bg-white/80 backdrop-blur-xl rounded-2xl border border-white/60 shadow-xl shadow-indigo-500/5 w-fit overflow-x-auto scrollbar-hide">
-                        <button 
-                            onClick={() => setCurrentTab('CHECK_IN')}
-                            className={`px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-2 transition-all whitespace-nowrap ${currentTab === 'CHECK_IN' ? 'bg-indigo-50 text-indigo-600 shadow-sm' : 'text-gray-500 hover:text-gray-700 hover:bg-white/50'}`}
-                        >
-                            <Clock className="w-4 h-4" /> ลงเวลา
-                        </button>
-                        
-                        <button 
-                            onClick={() => setCurrentTab('HISTORY')}
-                            className={`px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-2 transition-all whitespace-nowrap ${currentTab === 'HISTORY' ? 'bg-indigo-50 text-indigo-600 shadow-sm' : 'text-gray-500 hover:text-gray-700 hover:bg-white/50'}`}
-                        >
-                            <Calendar className="w-4 h-4" /> 
-                            <span>ประวัติ</span>
-                            {actionRequiredCount > 0 ? (
-                                <span className="inline-flex items-center justify-center bg-rose-500 text-white text-[9px] font-black h-[18px] min-w-[18px] px-1 rounded-full animate-bounce shadow-sm">
-                                    {actionRequiredCount}
-                                </span>
-                            ) : myPendingCount > 0 ? (
-                                <span className="inline-flex items-center justify-center bg-orange-500 text-white text-[9px] font-black h-[18px] min-w-[18px] px-1 rounded-full animate-pulse shadow-sm">
-                                    {myPendingCount}
-                                </span>
-                            ) : null}
-                        </button>
+                        {!(currentUser.role === 'ADMIN' && BRAND_CONFIG.adminAttendanceTabsMode === 2) && (
+                            <>
+                                <button 
+                                    onClick={() => selectTab('CHECK_IN')}
+                                    className={`px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-2 transition-all whitespace-nowrap ${currentTab === 'CHECK_IN' ? 'bg-indigo-50 text-indigo-600 shadow-sm' : 'text-gray-500 hover:text-gray-700 hover:bg-white/50'}`}
+                                >
+                                    <Clock className="w-4 h-4" /> ลงเวลา
+                                </button>
+                                
+                                <button 
+                                    onClick={() => selectTab('HISTORY')}
+                                    className={`px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-2 transition-all whitespace-nowrap ${currentTab === 'HISTORY' ? 'bg-indigo-50 text-indigo-600 shadow-sm' : 'text-gray-500 hover:text-gray-700 hover:bg-white/50'}`}
+                                >
+                                    <Calendar className="w-4 h-4" /> 
+                                    <span>ประวัติ</span>
+                                    {actionRequiredCount > 0 ? (
+                                        <span className="inline-flex items-center justify-center bg-rose-500 text-white text-[9px] font-bold h-[18px] min-w-[18px] px-1 rounded-full animate-bounce shadow-sm">
+                                            {actionRequiredCount}
+                                        </span>
+                                    ) : myPendingCount > 0 ? (
+                                        <span className="inline-flex items-center justify-center bg-orange-500 text-white text-[9px] font-bold h-[18px] min-w-[18px] px-1 rounded-full animate-pulse shadow-sm">
+                                            {myPendingCount}
+                                        </span>
+                                    ) : null}
+                                </button>
+                            </>
+                        )}
 
                         {/* Only Admin see these tabs */}
                         {currentUser.role === 'ADMIN' && (
                             <>
-                                <div className="w-px h-6 bg-gray-300/50 mx-1 self-center"></div>
+                                {BRAND_CONFIG.adminAttendanceTabsMode !== 2 && (
+                                    <div className="w-px h-6 bg-gray-300/50 mx-1 self-center"></div>
+                                )}
                                 <button 
-                                    onClick={() => setCurrentTab('TIMESHEET')}
+                                    onClick={() => selectTab('TIMESHEET')}
                                     className={`px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-2 transition-all whitespace-nowrap ${currentTab === 'TIMESHEET' ? 'bg-indigo-50 text-indigo-600 shadow-sm' : 'text-gray-500 hover:text-gray-700 hover:bg-white/50'}`}
                                 >
                                     <TableProperties className="w-4 h-4" /> ตรวจสอบทีม
                                 </button>
                                 <button 
-                                    onClick={() => setCurrentTab('APPROVALS')}
+                                    onClick={() => selectTab('APPROVALS')}
                                     className={`px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-2 transition-all whitespace-nowrap relative ${currentTab === 'APPROVALS' ? 'bg-indigo-50 text-indigo-600 shadow-sm' : 'text-gray-500 hover:text-gray-700 hover:bg-white/50'}`}
                                 >
                                     <FileCheck className="w-4 h-4" /> คำขออนุมัติ
                                     {adminPendingCount > 0 && (
-                                        <span className="ml-1 bg-red-500 text-white text-[10px] font-black px-1.5 py-0.5 rounded-full animate-pulse shadow-sm">
+                                        <span className="ml-1 bg-red-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full animate-pulse shadow-sm">
                                             {adminPendingCount}
                                         </span>
                                     )}
                                 </button>
                                 <button 
-                                    onClick={() => setCurrentTab('REPORT')}
+                                    onClick={() => selectTab('REPORT')}
                                     className={`px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-2 transition-all whitespace-nowrap ${currentTab === 'REPORT' ? 'bg-indigo-50 text-indigo-600 shadow-sm' : 'text-gray-500 hover:text-gray-700 hover:bg-white/50'}`}
                                 >
                                     <PieChart className="w-4 h-4" /> สรุปผลรายเดือน
@@ -151,7 +206,7 @@ const AttendanceRouter: React.FC<AttendanceRouterProps> = ({ currentUser, users 
                         whileHover={{ scale: 1.02, y: -1 }}
                         whileTap={{ scale: 0.98 }}
                         onClick={() => setIsQuotaOpen(true)}
-                        className="ml-auto md:ml-0 px-4 py-2.5 bg-[#FAF7F2] border-2 border-[#5C544A] text-[#5C544A] rounded-2xl text-xs font-extrabold flex items-center gap-2 shadow-[2px_2px_0px_0px_rgba(92,84,74,1)] hover:bg-[#F2ECE0] transition-colors relative group cursor-pointer"
+                        className="ml-auto md:ml-0 px-4 py-2.5 bg-[#FAF7F2] border-2 border-[#5C544A] text-[#5C544A] rounded-2xl text-xs font-bold flex items-center gap-2 shadow-[2px_2px_0px_0px_rgba(92,84,74,1)] hover:bg-[#F2ECE0] transition-colors relative group cursor-pointer"
                     >
                         {/* Animated Icon */}
                         <PieChart className="w-4 h-4 text-[#5C544A] group-hover:rotate-12 transition-transform duration-300 ease-out" /> 
@@ -183,7 +238,7 @@ const AttendanceRouter: React.FC<AttendanceRouterProps> = ({ currentUser, users 
                                      <AttendanceWidget 
                                         user={currentUser} 
                                         onNavigateToHistory={(date) => {
-                                            setCurrentTab('HISTORY');
+                                            selectTab('HISTORY');
                                             if (date) {
                                                 setHighlightedDate(date);
                                             }
@@ -269,7 +324,7 @@ const AttendanceRouter: React.FC<AttendanceRouterProps> = ({ currentUser, users 
                     onClose={() => setIsQuotaOpen(false)}
                     leaveUsage={leaveUsage}
                     onHistoryClick={() => {
-                        setCurrentTab('HISTORY');
+                        selectTab('HISTORY');
                         setIsQuotaOpen(false);
                     }}
                 />

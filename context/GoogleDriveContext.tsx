@@ -1,6 +1,7 @@
 
 import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
 import { useToast } from './ToastContext';
+import { useGlobalDialog } from './GlobalDialogContext';
 
 declare global {
     interface Window {
@@ -34,16 +35,46 @@ export const GoogleDriveProvider: React.FC<{ children: React.ReactNode }> = ({ c
     const [tokenClient, setTokenClient] = useState<any>(null);
     const [accessToken, setAccessToken] = useState<string | null>(null);
     const { showToast } = useToast();
+    const { showSuccess } = useGlobalDialog();
+    const activeTokenRef = useRef<string | null>(null);
 
-    const fetchServerToken = async () => {
+    const handleAuthSuccessToken = (token: string, forceShowAlert: boolean = false) => {
+        const isNewToken = activeTokenRef.current !== token;
+        activeTokenRef.current = token;
+        setAccessToken(token);
+
+        if (isNewToken || forceShowAlert) {
+            showToast('เชื่อมต่อ Google Drive สำเร็จ 🔓', 'success');
+            showSuccess('เชื่อมต่อ Google Drive สำเร็จเรียบร้อยแล้ว! ระบบ Juijui Planner พร้อมสำหรับอัปโหลดข้อมูลและดึงไฟล์งานจากไดรฟ์ของคุณทันที 📂✨', 'เชื่อมต่อสำเร็จ', true);
+        }
+
+        if (pendingAction.current === 'PICK') {
+            createPicker(token, pendingCallback.current);
+            pendingAction.current = null;
+            pendingCallback.current = null;
+        } else if (pendingAction.current === 'UPLOAD' && pendingFile.current) {
+            performUpload(token, pendingFile.current, pendingCallback.current, pendingFolderPath.current, pendingReject.current);
+            pendingAction.current = null;
+        }
+    };
+
+    const fetchServerToken = async (skipStateUpdate: boolean = false): Promise<string | null> => {
         try {
-            const response = await fetch('/api/auth/google/token');
+            const response = await fetch(`/api/auth/google/token?t=${Date.now()}`, {
+                credentials: 'same-origin',
+                headers: {
+                    'Cache-Control': 'no-cache, no-store'
+                }
+            });
             if (response.ok) {
                 const contentType = response.headers.get('content-type');
                 if (contentType && contentType.includes('application/json')) {
                     const data = await response.json();
                     if (data && data.accessToken) {
-                        setAccessToken(data.accessToken);
+                        if (!skipStateUpdate) {
+                            setAccessToken(data.accessToken);
+                            activeTokenRef.current = data.accessToken;
+                        }
                         return data.accessToken;
                     }
                 }
@@ -60,9 +91,16 @@ export const GoogleDriveProvider: React.FC<{ children: React.ReactNode }> = ({ c
     const pendingReject = useRef<((error: any) => void) | null>(null);
     const pendingFolderPath = useRef<string[]>([]);
 
-    const initGoogleScripts = () => {
-        if (!CLIENT_ID || !API_KEY) return;
+    const checkAndSyncAuth = async (forceShowAlert: boolean = false) => {
+        const token = await fetchServerToken(true);
+        if (token) {
+            handleAuthSuccessToken(token, forceShowAlert);
+            return true;
+        }
+        return false;
+    };
 
+    const initGoogleScripts = () => {
         const loadScript = (src: string) => {
             return new Promise((resolve, reject) => {
                 const existingScript = document.querySelector(`script[src="${src}"]`) as HTMLScriptElement;
@@ -87,14 +125,27 @@ export const GoogleDriveProvider: React.FC<{ children: React.ReactNode }> = ({ c
             });
         };
 
-        Promise.all([
-            loadScript('https://apis.google.com/js/api.js'),
-            loadScript('https://accounts.google.com/gsi/client'),
-        ]).then(() => {
-            if (window.gapi) {
+        const scriptsToLoad: Promise<any>[] = [];
+        if (API_KEY) {
+            scriptsToLoad.push(loadScript('https://apis.google.com/js/api.js'));
+        }
+        if (CLIENT_ID) {
+            scriptsToLoad.push(loadScript('https://accounts.google.com/gsi/client'));
+        }
+
+        if (scriptsToLoad.length === 0) {
+            // Default to ready so server-side OAuth flow can work
+            setIsReady(true);
+            return;
+        }
+
+        Promise.all(scriptsToLoad).then(() => {
+            if (window.gapi && API_KEY) {
                 window.gapi.load('picker', () => setIsReady(true));
+            } else {
+                setIsReady(true);
             }
-            if (window.google?.accounts?.oauth2) {
+            if (window.google?.accounts?.oauth2 && CLIENT_ID) {
                 const client = window.google.accounts.oauth2.initTokenClient({
                     client_id: CLIENT_ID,
                     scope: SCOPES,
@@ -104,7 +155,8 @@ export const GoogleDriveProvider: React.FC<{ children: React.ReactNode }> = ({ c
             }
         }).catch(err => {
             console.error("Failed to load Google Scripts", err);
-            showToast('ไม่สามารถโหลดระบบ Google Drive ได้ กรุณาตรวจสอบการเชื่อมต่อ', 'error');
+            // Fallback to ready so server-side OAuth flow can operate
+            setIsReady(true);
         });
     };
 
@@ -112,17 +164,19 @@ export const GoogleDriveProvider: React.FC<{ children: React.ReactNode }> = ({ c
         initGoogleScripts();
         fetchServerToken();
 
-        const handleMessage = (event: MessageEvent) => {
+        const handleMessage = async (event: MessageEvent) => {
             if (event.data?.type === 'GOOGLE_AUTH_SUCCESS') {
-                fetchServerToken();
+                await checkAndSyncAuth(true);
             }
         };
 
-        const handleStorage = (event: StorageEvent) => {
-            if (event.key === 'GOOGLE_AUTH_TIMESTAMP') {
-                fetchServerToken();
-                // Clean up to avoid multiple triggers
-                try { localStorage.removeItem('GOOGLE_AUTH_TIMESTAMP'); } catch(e) {}
+        const handleStorage = async (event: StorageEvent) => {
+            if (event.key === 'GOOGLE_AUTH_TIMESTAMP' || event.key === 'GOOGLE_AUTH_SUCCESS_DATA') {
+                await checkAndSyncAuth(true);
+                try { 
+                    localStorage.removeItem('GOOGLE_AUTH_TIMESTAMP');
+                    localStorage.removeItem('GOOGLE_AUTH_SUCCESS_DATA');
+                } catch(e) {}
             }
         };
 
@@ -143,11 +197,16 @@ export const GoogleDriveProvider: React.FC<{ children: React.ReactNode }> = ({ c
 
     const logout = async () => {
         setAccessToken(null);
+        activeTokenRef.current = null;
         try {
             await fetch('/api/auth/google/logout', { method: 'POST' });
         } catch (e) {
             console.error("Logout failed", e);
         }
+        try {
+            localStorage.removeItem('GOOGLE_AUTH_TIMESTAMP');
+            localStorage.removeItem('GOOGLE_AUTH_SUCCESS_DATA');
+        } catch(e) {}
         showToast('ตัดการเชื่อมต่อ Google Drive แล้ว', 'info');
     };
 
@@ -163,19 +222,11 @@ export const GoogleDriveProvider: React.FC<{ children: React.ReactNode }> = ({ c
         }
         
         const token = response.access_token;
-        setAccessToken(token);
-        showToast('เชื่อมต่อ Google Drive สำเร็จ 🔓', 'success');
-
-        if (pendingAction.current === 'PICK') {
-            createPicker(token, pendingCallback.current);
-        } else if (pendingAction.current === 'UPLOAD' && pendingFile.current) {
-            performUpload(token, pendingFile.current, pendingCallback.current, pendingFolderPath.current, pendingReject.current);
-        }
-        pendingAction.current = null;
+        handleAuthSuccessToken(token);
     };
 
     const login = async () => {
-        // 1. Open a placeholder window IMMEDIATELY to satisfy Safari's user-interaction requirement
+        // 1. Open a placeholder window IMMEDIATELY to satisfy browser popup policies
         const authWindow = window.open('about:blank', 'google_auth', 'width=600,height=700');
         
         if (!authWindow) {
@@ -183,7 +234,6 @@ export const GoogleDriveProvider: React.FC<{ children: React.ReactNode }> = ({ c
             return;
         }
 
-        // Show a loading message in the placeholder window while fetching the URL
         authWindow.document.write(`
             <html>
                 <head>
@@ -211,29 +261,58 @@ export const GoogleDriveProvider: React.FC<{ children: React.ReactNode }> = ({ c
             </html>
         `);
 
+        // Start fallback popup monitor to handle COOP or window.opener blocking
+        let pollCount = 0;
+        const maxPolls = 60; // 60 seconds
+        const pollInterval = setInterval(async () => {
+            pollCount++;
+            
+            // Check if login completed via storage/server session
+            const hasSuccess = localStorage.getItem('GOOGLE_AUTH_SUCCESS_DATA') || localStorage.getItem('GOOGLE_AUTH_TIMESTAMP');
+            if (hasSuccess) {
+                clearInterval(pollInterval);
+                await checkAndSyncAuth();
+                try {
+                    localStorage.removeItem('GOOGLE_AUTH_SUCCESS_DATA');
+                    localStorage.removeItem('GOOGLE_AUTH_TIMESTAMP');
+                } catch(e) {}
+                return;
+            }
+
+            if (authWindow.closed || pollCount >= maxPolls) {
+                clearInterval(pollInterval);
+                await checkAndSyncAuth();
+            }
+        }, 1000);
+
         try {
             // 2. Fetch the actual OAuth URL from our server
-            const response = await fetch('/api/auth/google/url');
+            const response = await fetch(`/api/auth/google/url?t=${Date.now()}`, {
+                headers: {
+                    'Cache-Control': 'no-cache, no-store'
+                }
+            });
             const contentType = response.headers.get('content-type');
             
+            let data: any = {};
+            if (contentType && contentType.includes('application/json')) {
+                data = await response.json();
+            }
+
             if (!response.ok) {
-                throw new Error('Failed to fetch auth URL');
+                throw new Error(data.error || `Server responded with status ${response.status}`);
             }
             
-            if (!contentType || !contentType.includes('application/json')) {
-                throw new Error('กรุณากดเปิดในหน้าต่างใหม่ (Open in new tab) หรือกดยินยอมรับคุกกี้ของระบบเนื่องจากเบราว์เซอร์ของคุณบล็อกคุกกี้ใน iFrame');
-            }
-            
-            const data = await response.json();
             if (!data.url) {
                 throw new Error(data.error || 'ไม่พบลิงก์เชื่อมต่อ');
             }
             
-            // 3. Update the existing window's location to the actual Google Auth URL
+            // 3. Update existing popup window's location to Google OAuth URL
             authWindow.location.href = data.url;
         } catch (error: any) {
             console.error('Login error:', error);
-            authWindow.close(); // Close the failed window
+            clearInterval(pollInterval);
+            try { authWindow.close(); } catch(e) {}
             showToast(error.message || 'ไม่สามารถเริ่มการเชื่อมต่อได้', 'error');
         }
     };
@@ -302,6 +381,7 @@ export const GoogleDriveProvider: React.FC<{ children: React.ReactNode }> = ({ c
                 // --- SESSION INTEGRITY: If unauthorized, clear token ---
                 if (response.status === 401 || errorReason === 'authError' || errorReason === 'invalid_grant') {
                     setAccessToken(null);
+                    activeTokenRef.current = null;
                     showToast('การเชื่อมต่อ Google Drive หมดอายุ กรุณาเข้าสู่ระบบใหม่', 'warning');
                 }
 
@@ -336,10 +416,6 @@ export const GoogleDriveProvider: React.FC<{ children: React.ReactNode }> = ({ c
 
     const uploadFileToDrive = (file: File, folderPath: string[] = []): Promise<any> => {
         return new Promise(async (resolve, reject) => {
-            if (!isReady || !tokenClient) {
-                showToast('Google Drive API ยังไม่พร้อม', 'error');
-                return reject(new Error('Not ready'));
-            }
             const timeoutId = setTimeout(() => {
                 setIsUploading(false);
                 reject(new Error('Timeout'));

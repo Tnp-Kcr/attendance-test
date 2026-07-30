@@ -3,31 +3,48 @@ import React from 'react';
 import { format, isPast } from 'date-fns';
 import { Coffee, UserX } from 'lucide-react';
 import { AttendanceLog } from '../../../types/attendance';
+import { getRegistryItem, findPendingRegistryItemByNote } from '../../../constants/attendanceRegistry';
 import { checkIsLate } from '../../../lib/attendanceUtils';
 
 interface TimesheetCellProps {
     date: Date;
     log?: AttendanceLog;
     leaveRequest?: any;
+    otRequest?: any;
     dayStatus: { status: 'WORK_DAY' | 'HOLIDAY', source: string, desc: string };
     isToday: boolean;
-    onClick: () => void;
-    workConfig: { startTime: string; buffer: number };
+    onCellClick: (log: AttendanceLog | null, leaveRequest?: any, otRequest?: any) => void;
+    workConfig: { 
+        startTime: string; 
+        buffer: number;
+        multipleShifts?: {
+            enabled?: boolean;
+            shiftsList?: string[] | string;
+        };
+    };
     userStartDate?: Date | string | null;
 }
 
-const TimesheetCell: React.FC<TimesheetCellProps> = ({ 
+const TimesheetCellComponent: React.FC<TimesheetCellProps> = ({ 
     date,
     log, 
     leaveRequest,
+    otRequest,
     dayStatus,
     isToday, 
-    onClick,
+    onCellClick,
     workConfig,
     userStartDate
 }) => {
     const isHoliday = dayStatus.status === 'HOLIDAY';
     const isPastDay = isPast(date) && !isToday;
+
+    const handleClick = () => {
+        if (log || leaveRequest || otRequest) {
+            onCellClick(log || null, leaveRequest, otRequest);
+        }
+    };
+
 
     // Check if user has started working on this date
     let hasStarted = true;
@@ -53,7 +70,7 @@ const TimesheetCell: React.FC<TimesheetCellProps> = ({
         if (!hasStarted) {
             return (
                 <div className="h-16 w-full flex flex-col items-center justify-center border-r border-slate-100/50 bg-slate-50/20 grayscale opacity-40">
-                    <span className="text-[7px] font-black text-slate-400 uppercase tracking-tighter">NOT JOINED</span>
+                    <span className="text-[7px] font-bold text-slate-400 uppercase tracking-tighter">NOT JOINED</span>
                 </div>
             );
         }
@@ -62,25 +79,52 @@ const TimesheetCell: React.FC<TimesheetCellProps> = ({
         if (leaveRequest && (hasPendingRequest || hasApprovedRequest)) {
             const isPending = hasPendingRequest;
             const type = leaveRequest.type;
+            const registryItem = getRegistryItem(type);
+            const regColors = registryItem ? registryItem.colors : { bg: 'bg-sky-50', text: 'text-sky-700', border: 'border-sky-200', accent: 'bg-sky-100' };
+            const displayLabel = registryItem ? (registryItem.id === 'VACATION' ? 'VAC' : registryItem.id === 'PERSONAL' ? 'PERS' : registryItem.id) : type;
             
             return (
                 <div 
-                    onClick={onClick}
+                    onClick={handleClick}
                     className={`h-16 w-full flex flex-col items-center justify-center border-r border-slate-100/50 cursor-pointer group/cell transition-all
                         ${isPending ? 'bg-amber-50/50 hover:bg-amber-50' : 
-                          isWFHRequest ? 'bg-emerald-50/30 hover:bg-emerald-50/50' : 'bg-sky-50/50 hover:bg-sky-50'}`}
+                          isWFHRequest ? 'bg-emerald-50/30 hover:bg-emerald-50/50' : `${regColors.bg}/30 hover:${regColors.bg}/50`}`}
                 >
                     <div className={`
-                        px-1.5 py-0.5 rounded-md border text-[8px] font-black uppercase tracking-tighter text-center leading-tight
+                        px-1.5 py-0.5 rounded-md border text-[8px] font-bold uppercase tracking-tighter text-center leading-tight
                         ${isPending ? 'bg-amber-100 border-amber-200 text-amber-700' :
-                          isWFHRequest ? 'bg-emerald-100 border-emerald-200 text-emerald-700' : 'bg-sky-100 border-sky-200 text-sky-700'}
+                          isWFHRequest ? 'bg-emerald-100 border-emerald-200 text-emerald-700' : `${regColors.accent} ${regColors.border} ${regColors.text}`}
                     `}>
                         {isPending ? 'PENDING' : ''}
                         <div className="mt-0.5">
-                            {type === 'WFH' ? 'WFH' : 
-                             type === 'VACATION' ? 'VAC' :
-                             type === 'SICK' ? 'SICK' :
-                             type === 'PERSONAL' ? 'PERS' : type}
+                            {displayLabel}
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        // 1.5 Handle OT Requests (Pending or Approved but no log yet)
+        if (otRequest) {
+            const isPending = otRequest.status === 'PENDING';
+            const isApproved = otRequest.status === 'APPROVED';
+            const isFixed = otRequest.is_fixed;
+            
+            return (
+                <div 
+                    onClick={handleClick}
+                    className={`h-16 w-full flex flex-col items-center justify-center border-r border-slate-100/50 cursor-pointer group/cell transition-all
+                        ${isPending ? 'bg-purple-50/30 hover:bg-purple-50/50' : 
+                          isFixed ? 'bg-purple-50/60 hover:bg-purple-100/80 border-l-2 border-purple-500' : 'bg-amber-50/40 hover:bg-amber-100/60 border-l-2 border-amber-500'}`}
+                >
+                    <div className={`
+                        px-1.5 py-0.5 rounded-md border text-[8px] font-bold uppercase tracking-tighter text-center leading-tight
+                        ${isPending ? 'bg-purple-100/80 border-purple-200 text-purple-700' :
+                          isFixed ? 'bg-purple-200/95 border-purple-300 text-purple-800 shadow-sm' : 'bg-amber-100 border-amber-200 text-amber-700'}
+                    `}>
+                        {isPending ? 'PENDING' : 'APPROVED'}
+                        <div className="mt-0.5 text-[7px] font-medium leading-none">
+                            {isFixed ? 'OT FIXED' : 'OT REGULAR'}
                         </div>
                     </div>
                 </div>
@@ -92,11 +136,11 @@ const TimesheetCell: React.FC<TimesheetCellProps> = ({
         if (isAbsent) {
             return (
                 <div 
-                    onClick={onClick}
+                    onClick={handleClick}
                     className="h-16 w-full flex flex-col items-center justify-center border-r border-slate-100/50 bg-red-50/30 cursor-pointer group/cell transition-all hover:bg-red-50"
                 >
                     <UserX className="w-4 h-4 text-red-400 opacity-40 group-hover/cell:scale-110 transition-transform" />
-                    <span className="text-[8px] font-black text-red-400 uppercase mt-1">ABSENT</span>
+                    <span className="text-[8px] font-bold text-red-400 uppercase mt-1">ABSENT</span>
                 </div>
             );
         }
@@ -122,22 +166,29 @@ const TimesheetCell: React.FC<TimesheetCellProps> = ({
         );
     }
 
-    const late = log.checkInTime && checkIsLate(log.checkInTime, workConfig.startTime, workConfig.buffer);
+    const late = log.checkInTime && checkIsLate(log.checkInTime, workConfig.startTime, workConfig.buffer, log.note, workConfig.multipleShifts);
     const isLeave = log.status === 'LEAVE' || log.workType === 'LEAVE';
     const isPendingVerify = log.status === 'PENDING_VERIFY';
     const isHardAbsent = log.status === 'ABSENT' || log.status === 'NO_SHOW';
     const isNoCheckIn = !log.checkInTime && !isLeave && !isHardAbsent;
     const leaveTypeMatch = log.note?.match(/\[APPROVED LEAVE: (.*?)\]/);
     const leaveType = leaveTypeMatch ? leaveTypeMatch[1] : null;
+    
+    const pendingItem = findPendingRegistryItemByNote(log.note || '');
+    const isGpsRejected = log.status === 'ACTION_REQUIRED' && ((log.note || '').includes('[REJECTED GPS_SPOOF_APPEAL]') || (log.note || '').includes('[REJECTED_GPS_SPOOF_APPEAL]'));
+    const isAnyProvisional = !!pendingItem && !isGpsRejected;
+    const isProvisionalLate = (pendingItem?.id === 'LATE_ENTRY' || log.status === 'APPEAL') && !isGpsRejected;
+    const isProvisionalGps = (pendingItem?.id === 'GPS_SPOOF_APPEAL' || (log.note || '').includes('[PROVISIONAL_GPS_SPOOF_APPEAL]') || (log.note || '').includes('[GPS_SPOOF_APPEAL_PENDING]') || (leaveRequest?.type === 'GPS_SPOOF_APPEAL' && leaveRequest?.status === 'PENDING')) && !isGpsRejected;
+    const isAppealState = (log.status === 'APPEAL' || isProvisionalLate || isProvisionalGps) && !isGpsRejected;
 
     if (isHardAbsent) {
         return (
             <div 
-                onClick={onClick}
+                onClick={handleClick}
                 className="h-16 w-full flex flex-col items-center justify-center border-r border-slate-100/50 bg-red-50/30 cursor-pointer group/cell transition-all hover:bg-red-50"
             >
                 <UserX className="w-4 h-4 text-red-400 opacity-40 group-hover/cell:scale-110 transition-transform" />
-                <span className="text-[8px] font-black text-red-400 uppercase mt-1">ABSENT</span>
+                <span className="text-[8px] font-bold text-red-400 uppercase mt-1">ABSENT</span>
                 {log.note?.includes('Judge') && (
                     <span className="text-[6px] font-bold text-red-300 uppercase tracking-tighter">JUDGED</span>
                 )}
@@ -147,7 +198,7 @@ const TimesheetCell: React.FC<TimesheetCellProps> = ({
 
     return (
         <div 
-            onClick={onClick}
+            onClick={handleClick}
             className={`
                 h-16 w-full border-r border-slate-100/50 p-1 transition-all duration-200 cursor-pointer group/cell relative
                 ${isToday ? 'bg-indigo-50/30' : ''}
@@ -155,7 +206,11 @@ const TimesheetCell: React.FC<TimesheetCellProps> = ({
         >
             <div className={`
                 w-full h-full rounded-xl flex flex-col items-center justify-center gap-0.5 border transition-all duration-200 group-hover/cell:scale-105 group-hover/cell:shadow-md
-                ${isLeave ? 'bg-sky-50 border-sky-100 text-sky-600' :
+                ${isGpsRejected ? 'bg-red-100 border-red-500 text-red-700 ring-1 ring-red-300 font-extrabold' :
+                  isProvisionalGps ? 'bg-rose-50/70 border-rose-400 border-dashed text-rose-700 ring-1 ring-rose-300/40' :
+                  isAppealState ? 'bg-violet-50/50 border-violet-400 border-dashed text-violet-700 ring-1 ring-violet-300/30' :
+                  isAnyProvisional ? 'bg-amber-50/45 border-amber-400 border-dashed text-amber-700 ring-1 ring-amber-300/30' :
+                  isLeave ? 'bg-sky-50 border-sky-100 text-sky-600' :
                   isNoCheckIn ? 'bg-amber-50 border-amber-200 text-amber-600' :
                   isPendingVerify ? 'bg-amber-50 border-amber-200 text-amber-600' :
                   late ? 'bg-orange-50 border-orange-200 text-orange-600' :
@@ -163,7 +218,7 @@ const TimesheetCell: React.FC<TimesheetCellProps> = ({
                 ${dayStatus.status === 'HOLIDAY' ? 'ring-2 ring-orange-200 ring-offset-1' : ''}
             `}>
                 {isLeave && (leaveType || leaveRequest?.type) ? (
-                    <span className="text-[9px] font-black uppercase tracking-tighter text-center px-1 leading-tight">
+                    <span className="text-[9px] font-bold uppercase tracking-tighter text-center px-1 leading-tight">
                         {isPendingVerify && <div className="text-[7px] opacity-70 mb-0.5">VERIFY</div>}
                         {(leaveType || leaveRequest?.type) === 'UNPAID' ? 'UNPAID' : 
                          (leaveType || leaveRequest?.type) === 'SICK' ? 'SICK' :
@@ -172,23 +227,40 @@ const TimesheetCell: React.FC<TimesheetCellProps> = ({
                     </span>
                 ) : isNoCheckIn ? (
                     <div className="flex flex-col items-center">
-                        <div className="text-[7px] font-black opacity-70 tracking-tighter mb-0.5">
+                        <div className="text-[7px] font-bold opacity-70 tracking-tighter mb-0.5">
                             {log.workType === 'WFH' ? 'WFH' : 'LOGGED'}
                         </div>
-                        <span className="text-[9px] font-black uppercase tracking-tighter text-center px-1 leading-tight">
+                        <span className="text-[9px] font-bold uppercase tracking-tighter text-center px-1 leading-tight">
                             NO-IN
                         </span>
                     </div>
                 ) : (
                     <>
-                        {isPendingVerify && <div className="text-[7px] font-black opacity-70 tracking-tighter">VERIFY</div>}
-                        <span className="text-[10px] font-black font-mono leading-none">
+                        {isPendingVerify && <div className="text-[7px] font-bold opacity-70 tracking-tighter">VERIFY</div>}
+                        <span className="text-[10px] font-bold font-mono leading-none">
                             {log.checkInTime ? format(log.checkInTime, 'HH:mm') : '--:--'}
                         </span>
                         <div className="w-4 h-[1px] bg-current opacity-20"></div>
-                        <span className="text-[10px] font-black font-mono leading-none opacity-60">
+                        <span className="text-[10px] font-bold font-mono leading-none opacity-60">
                             {log.checkOutTime ? format(log.checkOutTime, 'HH:mm') : '--:--'}
                         </span>
+                        {isGpsRejected ? (
+                            <span className="text-[7px] font-bold bg-red-600 text-white px-1 py-0.5 rounded scale-90 uppercase tracking-tighter mt-0.5 select-none whitespace-nowrap">
+                                🔴 GPS โดนปฏิเสธ
+                            </span>
+                        ) : isProvisionalGps ? (
+                            <span className="text-[7px] font-bold bg-rose-200/90 text-rose-950 px-1 py-0.5 rounded scale-90 uppercase tracking-tighter mt-0.5 select-none animate-pulse whitespace-nowrap">
+                                🚨 GPS จำลอง
+                            </span>
+                        ) : isAppealState ? (
+                            <span className="text-[7px] font-bold bg-violet-200/80 text-violet-950 px-1 py-0.5 rounded scale-90 uppercase tracking-tighter mt-0.5 select-none animate-pulse whitespace-nowrap">
+                                ⏳ อุทธรณ์
+                            </span>
+                        ) : isAnyProvisional ? (
+                            <span className="text-[7px] font-bold bg-amber-200/80 text-amber-950 px-1 py-0.5 rounded scale-90 uppercase tracking-tighter mt-0.5 select-none animate-pulse whitespace-nowrap">
+                                ⏳ รอตรวจ
+                            </span>
+                        ) : null}
                     </>
                 )}
                 
@@ -198,14 +270,62 @@ const TimesheetCell: React.FC<TimesheetCellProps> = ({
                     </div>
                 )}
 
-                {dayStatus.status === 'HOLIDAY' && (
-                    <div className="absolute -bottom-1 -right-1">
-                        <div className="bg-orange-500 text-white text-[7px] font-black px-1 rounded-sm shadow-sm">OT</div>
+                {otRequest && otRequest.status === 'APPROVED' ? (
+                    <div className="absolute -bottom-1 -right-1 z-[20]">
+                        <div className={`text-[7px] font-bold px-1 py-0.5 rounded-sm shadow-sm text-white whitespace-nowrap leading-none ${otRequest.is_fixed ? 'bg-purple-600' : 'bg-amber-500'}`}>
+                            {otRequest.is_fixed ? 'OT เหมา' : 'OT'}
+                        </div>
                     </div>
-                )}
+                ) : dayStatus.status === 'HOLIDAY' ? (
+                    <div className="absolute -bottom-1 -right-1">
+                        <div className="bg-orange-500 text-white text-[7px] font-bold px-1 rounded-sm shadow-sm">OT</div>
+                    </div>
+                ) : null}
             </div>
         </div>
     );
 };
+
+const areEqual = (prevProps: TimesheetCellProps, nextProps: TimesheetCellProps) => {
+    const getTimeVal = (d: any) => {
+        if (!d) return null;
+        if (d instanceof Date) return d.getTime();
+        return new Date(d).getTime();
+    };
+
+    return (
+        prevProps.isToday === nextProps.isToday &&
+        prevProps.userStartDate === nextProps.userStartDate &&
+        prevProps.date.getTime() === nextProps.date.getTime() &&
+        // Shallow compare dayStatus
+        prevProps.dayStatus.status === nextProps.dayStatus.status &&
+        prevProps.dayStatus.source === nextProps.dayStatus.source &&
+        prevProps.dayStatus.desc === nextProps.dayStatus.desc &&
+        // Compare log properties that actually affect rendering
+        prevProps.log?.id === nextProps.log?.id &&
+        prevProps.log?.status === nextProps.log?.status &&
+        prevProps.log?.workType === nextProps.log?.workType &&
+        getTimeVal(prevProps.log?.checkInTime) === getTimeVal(nextProps.log?.checkInTime) &&
+        getTimeVal(prevProps.log?.checkOutTime) === getTimeVal(nextProps.log?.checkOutTime) &&
+        prevProps.log?.note === nextProps.log?.note &&
+        // Compare leaveRequest properties
+        prevProps.leaveRequest?.id === nextProps.leaveRequest?.id &&
+        prevProps.leaveRequest?.status === nextProps.leaveRequest?.status &&
+        prevProps.leaveRequest?.type === nextProps.leaveRequest?.type &&
+        prevProps.leaveRequest?.reason === nextProps.leaveRequest?.reason &&
+        // Compare otRequest properties
+        prevProps.otRequest?.id === nextProps.otRequest?.id &&
+        prevProps.otRequest?.status === nextProps.otRequest?.status &&
+        prevProps.otRequest?.is_fixed === nextProps.otRequest?.is_fixed &&
+        prevProps.otRequest?.duration_hours === nextProps.otRequest?.duration_hours &&
+        // Compare workConfig
+        prevProps.workConfig.startTime === nextProps.workConfig.startTime &&
+        prevProps.workConfig.buffer === nextProps.workConfig.buffer &&
+        prevProps.workConfig.multipleShifts?.enabled === nextProps.workConfig.multipleShifts?.enabled &&
+        prevProps.workConfig.multipleShifts?.shiftsList === nextProps.workConfig.multipleShifts?.shiftsList
+    );
+};
+
+const TimesheetCell = React.memo(TimesheetCellComponent, areEqual);
 
 export default TimesheetCell;

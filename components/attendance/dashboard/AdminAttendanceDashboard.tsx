@@ -52,6 +52,9 @@ interface UserStat {
     totalLateMinutes?: number;
     totalOtHours?: number;
     totalOtPayout?: number;
+    totalFixedOtDays?: number;
+    hasProvisionalForgot?: boolean;
+    provisionalForgotCount?: number;
 }
 
 import { useMasterData } from '../../../hooks/useMasterData';
@@ -70,10 +73,44 @@ const AdminAttendanceDashboard: React.FC<AdminAttendanceDashboardProps> = ({ use
     const [selectedPosition, setSelectedPosition] = useState('ALL');
     const [viewMode, setViewMode] = useState<'TABLE' | 'ANALYTICS'>('TABLE');
     const [lateViewMode, setLateViewMode] = useState<'DAYS' | 'HOURS'>('DAYS');
-    const [otViewMode, setOtViewMode] = useState<'HOURS' | 'PAYOUT'>('HOURS');
+    const [otViewMode, setOtViewMode] = useState<'HOURS' | 'LUMP_SUM' | 'BOTH' | 'PAYOUT'>('HOURS');
     const [activeStatFilter, setActiveStatFilter] = useState<'ALL' | 'PRESENT' | 'LATE' | 'ABSENT' | 'LEAVE'>('ALL');
     const [sortDirection, setSortDirection] = useState<'ASC' | 'DESC'>('DESC');
     const [isToolsExpanded, setIsToolsExpanded] = useState(false);
+    const [hpViewMode, setHpViewMode] = useState<'MONTHLY' | 'YEARLY'>('MONTHLY');
+    const [snapshots, setSnapshots] = useState<any[]>([]);
+
+    useEffect(() => {
+        const fetchSnapshots = async () => {
+            try {
+                const { data, error } = await supabase
+                    .from('hp_snapshots')
+                    .select('*');
+                if (error) {
+                    console.warn("hp_snapshots might not exist yet:", error);
+                } else if (data) {
+                    setSnapshots(data);
+                }
+            } catch (e) {
+                console.warn("Error loading hp_snapshots:", e);
+            }
+        };
+        fetchSnapshots();
+
+        const hpChannel = supabase.channel('hp-snapshots-dashboard')
+            .on('postgres_changes', {
+                event: '*',
+                schema: 'public',
+                table: 'hp_snapshots'
+            }, () => {
+                fetchSnapshots();
+            })
+            .subscribe();
+
+        return () => {
+            supabase.removeChannel(hpChannel);
+        };
+    }, []);
 
     useEffect(() => {
         setSortDirection('DESC');
@@ -126,6 +163,13 @@ const AdminAttendanceDashboard: React.FC<AdminAttendanceDashboardProps> = ({ use
         const buffer = parseInt(workConfig.find(c => c.key === 'LATE_BUFFER')?.label || '0');
         setStartTime(start);
         setLateBuffer(buffer);
+    }, [masterOptions]);
+
+    const multipleShifts = useMemo(() => {
+        const workConfig = masterOptions.filter(opt => opt.type === 'WORK_CONFIG');
+        const enabled = workConfig.find(c => c.key === 'MULTIPLE_SHIFTS_ENABLED')?.label === 'true';
+        const shiftsList = workConfig.find(c => c.key === 'MULTIPLE_SHIFTS_LIST')?.label || '';
+        return { enabled, shiftsList };
     }, [masterOptions]);
 
     // Fetch Logs for the selected month or range
@@ -196,7 +240,9 @@ const AdminAttendanceDashboard: React.FC<AdminAttendanceDashboardProps> = ({ use
                 totalHours: 0,
                 avgCheckIn: '-',
                 logs: [],
-                totalLateMinutes: 0
+                totalLateMinutes: 0,
+                hasProvisionalForgot: false,
+                provisionalForgotCount: 0
             };
         });
 
@@ -206,21 +252,42 @@ const AdminAttendanceDashboard: React.FC<AdminAttendanceDashboardProps> = ({ use
                 const stat = statsMap[log.userId];
                 stat.logs.push(log);
 
+                const isProvisional = !!log.note?.includes('[PROVISIONAL_FORGOT_CHECKIN]') || 
+                                      !!log.note?.includes('[PROVISIONAL_LATE_ENTRY]') || 
+                                      !!log.note?.includes('[PROVISIONAL_WFH]') || 
+                                      !!log.note?.includes('[PROVISIONAL_ONSITE]') ||
+                                      !!log.note?.includes('[PROVISIONAL_CHECKOUT]') ||
+                                      !!log.note?.includes('[PROVISIONAL_GPS_SPOOF_APPEAL]') ||
+                                      !!log.note?.includes('[GPS_SPOOF_APPEAL_PENDING]') ||
+                                      !!log.note?.includes('[FORGOT_BOTH_PENDING]') ||
+                                      !!log.note?.includes('[APPEAL_PENDING]');
+                if (isProvisional) {
+                    stat.provisionalForgotCount = (stat.provisionalForgotCount || 0) + 1;
+                    stat.hasProvisionalForgot = true;
+                }
+
+                const isGpsRejected = !!log.note?.includes('[REJECTED GPS_SPOOF_APPEAL]') || 
+                                      !!log.note?.includes('[REJECTED_GPS_SPOOF_APPEAL]');
+
                 if (log.status === 'LEAVE' || log.workType === 'LEAVE') {
                     stat.leaves++;
+                } else if (log.status === 'ABSENT' || log.workType === 'ABSENT') {
+                    stat.absent++;
                 } else {
-                    stat.present++;
+                    if (!isProvisional && !isGpsRejected) {
+                        stat.present++;
+                    }
 
                     const summary = getAttendanceSummary(
                         log.checkInTime,
                         log.checkOutTime,
-                        { startTime, buffer: lateBuffer, minHours: 9 }
+                        { startTime, buffer: lateBuffer, minHours: 9, note: log.note, multipleShifts }
                     );
 
                     if (summary.isLate) {
                         stat.late++;
                     }
-                    const lateMins = getLateMinutes(log.checkInTime, startTime, lateBuffer);
+                    const lateMins = getLateMinutes(log.checkInTime, startTime, lateBuffer, log.note, multipleShifts);
                     stat.totalLateMinutes = (stat.totalLateMinutes || 0) + lateMins;
                     stat.totalHours += summary.workHours;
                 }
@@ -229,7 +296,26 @@ const AdminAttendanceDashboard: React.FC<AdminAttendanceDashboardProps> = ({ use
 
         // Calculate Absents
         Object.values(statsMap).forEach(stat => {
+            const user = users.find(u => u.id === stat.userId);
+            const userStartDate = user?.startDate ? new Date(user.startDate) : (user?.createdAt ? new Date(user.createdAt) : null);
+
+            // Set of logged dates and leave dates for O(1) lookups
+            const loggedDates = new Set(stat.logs.map(l => l.date));
+            const leaveDates = new Set(
+                stat.logs
+                    .filter(l => l.status === 'LEAVE' || l.workType === 'LEAVE')
+                    .map(l => l.date)
+            );
+
             workingDaysInMonth.forEach(day => {
+                if (userStartDate) {
+                    const dayStr = format(day, 'yyyy-MM-dd');
+                    const startStr = format(userStartDate, 'yyyy-MM-dd');
+                    // หากวันทำงานนั้นๆ เกิดขึ้นก่อนวันที่พนักงานเริ่มงานจริง ให้ข้ามไป ไม่นับเป็นวันขาดงาน
+                    if (dayStr < startStr) {
+                        return;
+                    }
+                }
                 // Check if this day is in the future
                 const isFutureDay = (day.getFullYear() > today.getFullYear()) ||
                                     (day.getFullYear() === today.getFullYear() && day.getMonth() > today.getMonth()) ||
@@ -241,9 +327,26 @@ const AdminAttendanceDashboard: React.FC<AdminAttendanceDashboardProps> = ({ use
                                 day.getFullYear() === today.getFullYear();
 
                 if (isToday) {
+                    // 1. กำหนดเวลาเริ่มงานหลักเป็นตัวแปรตั้งต้นก่อน (เช่น 10:00)
+                    let targetStartTime = startTime; 
+
+                    // 2. ถ้าเปิดใช้งาน MULTIPLE_SHIFTS ให้ดึงกะที่สายที่สุดมาใช้งานแทน
+                    if (multipleShifts.enabled && multipleShifts.shiftsList) {
+                        const shifts = multipleShifts.shiftsList
+                            .split(',')
+                            .map(s => s.trim())
+                            .filter(Boolean);
+                        
+                        if (shifts.length > 0) {
+                            shifts.sort(); // เรียงลำดับเวลาจากเช้าสุดไปสายสุด (เช่น "08:00" -> "08:30" -> "09:00")
+                            targetStartTime = shifts[shifts.length - 1]; // เลือกเวลาที่สายที่สุด (เช่น "09:00")
+                        }
+                    }
+
+                    // 3. นำเวลาที่เลือกได้ (targetStartTime) มาแปลงเป็นชั่วโมงและนาทีเพื่อเปรียบเทียบตามเดิม
                     let [startHour, startMin] = [10, 0];
-                    if (startTime && startTime.includes(':')) {
-                        const parts = startTime.split(':');
+                    if (targetStartTime && targetStartTime.includes(':')) {
+                        const parts = targetStartTime.split(':');
                         startHour = parseInt(parts[0], 10) || 10;
                         startMin = parseInt(parts[1], 10) || 0;
                     }
@@ -258,8 +361,8 @@ const AdminAttendanceDashboard: React.FC<AdminAttendanceDashboardProps> = ({ use
                 }
                 
                 const dateStr = format(day, 'yyyy-MM-dd');
-                const hasLog = stat.logs.some(l => l.date === dateStr);
-                const isLeave = stat.logs.some(l => l.date === dateStr && (l.status === 'LEAVE' || l.workType === 'LEAVE'));
+                const hasLog = loggedDates.has(dateStr);
+                const isLeave = leaveDates.has(dateStr);
                 
                 if (!hasLog && !isLeave) {
                     stat.absent++;
@@ -278,12 +381,21 @@ const AdminAttendanceDashboard: React.FC<AdminAttendanceDashboardProps> = ({ use
 
         Object.values(statsMap).forEach(stat => {
             const userOt = activeOtRequests.filter(req => req.userId === stat.userId);
-            stat.totalOtHours = userOt.reduce((sum, req) => sum + req.durationHours, 0);
+            const hourlyOt = userOt.filter(req => !req.isFixed && (!req.reason || !req.reason.includes('[OT:FIXED]')));
+            const fixedOt = userOt.filter(req => req.isFixed || (req.reason && req.reason.includes('[OT:FIXED]')));
+
+            stat.totalOtHours = hourlyOt.reduce((sum, req) => sum + req.durationHours, 0);
+            stat.totalFixedOtDays = fixedOt.length;
             stat.totalOtPayout = userOt.reduce((sum, req) => sum + req.computedPayout, 0);
         });
 
         return Object.values(statsMap);
-    }, [users, logs, startTime, lateBuffer, workingDaysInMonth, otRequests, currentMonth, dateFilterMode, customStartDate, customEndDate]);
+    }, [users, logs, startTime, lateBuffer, workingDaysInMonth, otRequests, currentMonth, dateFilterMode, customStartDate, customEndDate, multipleShifts]);
+
+    // Index users by ID for O(1) lookups
+    const userMap = useMemo(() => {
+        return new Map(users.map(u => [u.id, u]));
+    }, [users]);
 
     // Compute unique positions from active users
     const positions = useMemo(() => {
@@ -294,7 +406,7 @@ const AdminAttendanceDashboard: React.FC<AdminAttendanceDashboardProps> = ({ use
     // Filtering (Two-Phase Filtering)
     const filteredStats = useMemo(() => {
         const baseFiltered = userStats.filter(stat => {
-            const user = users.find(u => u.id === stat.userId);
+            const user = userMap.get(stat.userId);
             if (!user) return false;
 
             const matchesSearch = user.name.toLowerCase().includes(searchTerm.toLowerCase());
@@ -354,7 +466,7 @@ const AdminAttendanceDashboard: React.FC<AdminAttendanceDashboardProps> = ({ use
                 return valB - valA;
             }
         });
-    }, [userStats, users, searchTerm, selectedEmploymentType, selectedPosition, activeStatFilter, sortDirection, lateViewMode]);
+    }, [userStats, userMap, searchTerm, selectedEmploymentType, selectedPosition, activeStatFilter, sortDirection, lateViewMode]);
 
     // Aggregates
     const totalCheckins = logs.filter(l => l.status !== 'LEAVE').length;
@@ -364,6 +476,9 @@ const AdminAttendanceDashboard: React.FC<AdminAttendanceDashboardProps> = ({ use
     const lateRate = totalCheckins > 0 ? Math.round((totalLates / totalCheckins) * 100) : 0;
 
     const getGrade = (stat: UserStat) => {
+        if (stat.hasProvisionalForgot) {
+            return { grade: '⏳ WAIT', color: 'bg-amber-50 text-amber-700 border border-amber-200/40 animate-pulse' };
+        }
         if (stat.present === 0 && stat.leaves === 0) return { grade: 'N/A', color: 'bg-gray-100 text-gray-400' };
 
         // Use Dynamic Rules from Config if available
@@ -402,7 +517,7 @@ const AdminAttendanceDashboard: React.FC<AdminAttendanceDashboardProps> = ({ use
         
         // 2. Rows
         const rows = filteredStats.map(stat => {
-            const user = users.find(u => u.id === stat.userId);
+            const user = userMap.get(stat.userId);
             const gradeInfo = getGrade(stat);
             
             let lateValue: string | number = stat.late;
@@ -499,6 +614,10 @@ const AdminAttendanceDashboard: React.FC<AdminAttendanceDashboardProps> = ({ use
                             onLateViewModeChange={setLateViewMode}
                             otViewMode={otViewMode}
                             onOtViewModeChange={setOtViewMode}
+                            hpViewMode={hpViewMode}
+                            onHpViewModeChange={setHpViewMode}
+                            snapshots={snapshots}
+                            currentMonth={currentMonth}
                         />
 
                         <div className="flex justify-end">

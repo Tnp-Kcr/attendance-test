@@ -45,7 +45,7 @@ const ExportConfigPanel: React.FC<ExportConfigPanelProps> = ({
                     <div className="p-1.5 bg-indigo-50 text-indigo-600 rounded-lg">
                         <FileText className="w-4 h-4" />
                     </div>
-                    <h4 className="text-xs font-extrabold text-slate-800 uppercase tracking-wider">รูปแบบข้อมูลในเซลล์ (Cell Format)</h4>
+                    <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider">รูปแบบข้อมูลในเซลล์ (Cell Format)</h4>
                 </div>
                 
                 {/* Segmented Controller Slider */}
@@ -86,7 +86,7 @@ const ExportConfigPanel: React.FC<ExportConfigPanelProps> = ({
                     <div className="p-1.5 bg-blue-50 text-blue-600 rounded-lg">
                         <Layout className="w-4 h-4" />
                     </div>
-                    <h4 className="text-xs font-extrabold text-slate-800 uppercase tracking-wider">คอลัมน์รายงานเสริม (Columns Settings)</h4>
+                    <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider">คอลัมน์รายงานเสริม (Columns Settings)</h4>
                 </div>
 
                 <div className="space-y-3">
@@ -174,14 +174,14 @@ const ExportConfigPanel: React.FC<ExportConfigPanelProps> = ({
                     <div className="p-1.5 bg-amber-50 text-amber-600 rounded-lg">
                         <Calendar className="w-4 h-4" />
                     </div>
-                    <h4 className="text-xs font-extrabold text-slate-800 uppercase tracking-wider">วันหยุดสัปดาห์ / วันหยุดพิเศษ (Holiday Treatment)</h4>
+                    <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider">วันหยุดสัปดาห์ / วันหยุดพิเศษ (Holiday Treatment)</h4>
                 </div>
 
                 <div className="grid grid-cols-2 gap-2 bg-slate-100 p-1 rounded-xl">
                     <button 
                         type="button"
                         onClick={() => setHolidayFormat('text')}
-                        className={`py-2 rounded-lg text-[11px] font-black tracking-tight transition-all ${
+                        className={`py-2 rounded-lg text-[11px] font-bold tracking-tight transition-all ${
                             holidayFormat === 'text' 
                                 ? 'bg-white text-slate-800 shadow-sm' 
                                 : 'text-slate-500 hover:text-slate-700'
@@ -192,7 +192,7 @@ const ExportConfigPanel: React.FC<ExportConfigPanelProps> = ({
                     <button 
                         type="button"
                         onClick={() => setHolidayFormat('blank')}
-                        className={`py-2 rounded-lg text-[11px] font-black tracking-tight transition-all ${
+                        className={`py-2 rounded-lg text-[11px] font-bold tracking-tight transition-all ${
                             holidayFormat === 'blank' 
                                 ? 'bg-white text-slate-800 shadow-sm' 
                                 : 'text-slate-500 hover:text-slate-700'
@@ -209,7 +209,7 @@ const ExportConfigPanel: React.FC<ExportConfigPanelProps> = ({
                     <Sparkles className="w-4 h-4 text-emerald-600 animate-pulse" />
                 </div>
                 <div className="space-y-0.5">
-                    <h5 className="text-[11px] font-black text-emerald-800 uppercase tracking-wider">รองรับภาษาไทยใน Microsoft Excel 100%</h5>
+                    <h5 className="text-[11px] font-bold text-emerald-800 uppercase tracking-wider">รองรับภาษาไทยใน Microsoft Excel 100%</h5>
                     <p className="text-[10px] text-emerald-700/95 leading-relaxed">
                         เข้ารหัสแบบ UTF-8 BOM อัตโนมัติ ป้องกันปัญหาอักษรต่างดาวเมื่อเปิดไฟล์รายงานใน Excel ทุกรุ่น
                     </p>

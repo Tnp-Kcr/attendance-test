@@ -8,6 +8,7 @@ import { LeaveRequest } from '../../../../types/attendance';
 import { 
     ParsedReason, getTypeName, getTypeColorClass 
 } from './utils';
+import { AttachmentPreview } from './AttachmentPreview';
 
 interface RequestInfoSectionProps {
     request: LeaveRequest;
@@ -54,7 +55,7 @@ export const RequestInfoSection: React.FC<RequestInfoSectionProps> = ({
                         )}
                     </div>
                     {durationText && (
-                        <p className="text-xs text-indigo-600 font-extrabold mt-1">{durationText}</p>
+                        <p className="text-xs text-indigo-600 font-bold mt-1">{durationText}</p>
                     )}
                 </div>
 
@@ -78,13 +79,37 @@ export const RequestInfoSection: React.FC<RequestInfoSectionProps> = ({
             </div>
 
             {/* Smart Alert flags if any */}
-            {(parsed.isLateSubmission || parsed.isLocationMismatch || parsed.forgotCheckoutPenalty) && (
+            {(parsed.isLateSubmission || parsed.isLocationMismatch || parsed.forgotCheckoutPenalty || parsed.isProvisionalWfh || parsed.isProvisionalOnsite || parsed.isProvisionalForgotCheckin || parsed.isProvisionalGps) && (
                 <div className="space-y-2">
                     <div className="flex items-center gap-2 text-xs font-bold text-slate-400 uppercase tracking-wider">
                         <ShieldAlert className="w-4 h-4 text-slate-500" />
                         <span>สัญญาณแจ้งเตือนระบบ (Smart Flags)</span>
                     </div>
                     <div className="grid gap-2">
+                        {parsed.isProvisionalGps && (
+                            <div className="flex items-center gap-2.5 p-3 rounded-xl bg-purple-50 text-purple-800 border border-purple-100 text-xs font-bold shadow-sm animate-pulse">
+                                <AlertTriangle className="w-4 h-4 shrink-0 text-purple-500" />
+                                <span>📍 ลงเวลาแบบจำลอง (คำขออุทธรณ์พิกัด GPS อยู่ระหว่างรอการตรวจสอบและอนุมัติจากแอดมิน ระบบให้ลงเวลาทำงานชั่วคราวแล้ว)</span>
+                            </div>
+                        )}
+                        {parsed.isProvisionalWfh && (
+                            <div className="flex items-center gap-2.5 p-3 rounded-xl bg-sky-50 text-sky-800 border border-sky-100 text-xs font-bold shadow-sm animate-pulse">
+                                <AlertTriangle className="w-4 h-4 shrink-0 text-sky-500" />
+                                <span>WFH แบบจำลอง (ระบบสร้างใบคำขอให้อัตโนมัติ รออนุมัติสิทธิ์ย้อนหลัง)</span>
+                            </div>
+                        )}
+                        {parsed.isProvisionalOnsite && (
+                            <div className="flex items-center gap-2.5 p-3 rounded-xl bg-orange-50 text-orange-800 border border-orange-100 text-xs font-bold shadow-sm animate-pulse">
+                                <AlertTriangle className="w-4 h-4 shrink-0 text-orange-500" />
+                                <span>On-site แบบจำลอง (ระบบสร้างใบคำขอให้อัตโนมัติ รออนุมัติสิทธิ์ย้อนหลัง)</span>
+                            </div>
+                        )}
+                        {parsed.isProvisionalForgotCheckin && (
+                            <div className="flex items-center gap-2.5 p-3 rounded-xl bg-amber-50 text-amber-800 border border-amber-100 text-xs font-bold shadow-sm animate-pulse">
+                                <AlertTriangle className="w-4 h-4 shrink-0 text-amber-500" />
+                                <span>ลืมลงเวลาแบบจำลอง (ระบบสร้างใบคำขอให้อัตโนมัติ รออนุมัติสิทธิ์ย้อนหลัง)</span>
+                            </div>
+                        )}
                         {parsed.isLateSubmission && (
                             <div className="flex items-center gap-2.5 p-3 rounded-xl bg-amber-50 text-amber-800 border border-amber-100 text-xs font-bold shadow-sm">
                                 <AlertTriangle className="w-4 h-4 shrink-0 text-amber-500" />
@@ -110,13 +135,21 @@ export const RequestInfoSection: React.FC<RequestInfoSectionProps> = ({
             {/* Reason Text Area */}
             <div className="space-y-2">
                 <div className="flex items-center gap-2 text-xs font-semibold text-slate-400 uppercase tracking-wider">
-                    <FileText className="w-4 h-4 text-slate-500" />
+                    <FileText className="w-4 h-4 text-slate-500"
+                     />
                     <span>เหตุผลความจำเป็น</span>
                 </div>
                 <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100 text-slate-700 text-sm leading-relaxed whitespace-pre-wrap italic shadow-inner">
                     "{parsed.cleanReason || 'ไม่มีการระบุเหตุผลความจำเป็นเพิ่มเติม'}"
                 </div>
             </div>
+
+            {/* Attachment Preview (if any) */}
+            {(request.attachmentUrl || parsed.proofUrl) && (
+                <div className="pt-2">
+                    <AttachmentPreview attachmentUrl={request.attachmentUrl || parsed.proofUrl || ''} />
+                </div>
+            )}
         </div>
     );
 };

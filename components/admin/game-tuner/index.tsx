@@ -5,7 +5,7 @@ import { useToast } from '../../../context/ToastContext';
 import { useGlobalDialog } from '../../../context/GlobalDialogContext';
 import { 
     Save, RefreshCw, Trophy, Gavel, ShoppingBag, 
-    Zap, TrendingUp
+    Zap, TrendingUp, Settings
 } from 'lucide-react';
 import { motion, AnimatePresence } from "framer-motion";
 
@@ -13,9 +13,10 @@ import EconomyTuner from './EconomyTuner';
 import QuestsTuner from './QuestsTuner';
 import LawTuner from './LawTuner';
 import ShopTuner from './ShopTuner';
+import { DBSyncCenter } from './components/DBSyncCenter';
 
 const GameConfigTuner = () => {
-    const { config, updateConfigValue, refreshConfig, isLoading } = useGameConfig();
+    const { config, updateConfigValue, updateConfigsBulk, refreshConfig, isLoading } = useGameConfig();
     const { masterOptions } = useMasterData();
     const { showToast } = useToast();
     const { showConfirm } = useGlobalDialog();
@@ -24,6 +25,7 @@ const GameConfigTuner = () => {
     const [localConfig, setLocalConfig] = useState<any>(null);
     const [isDirty, setIsDirty] = useState(false);
     const [isSaving, setIsSaving] = useState(false);
+    const [syncVersion, setSyncVersion] = useState(0);
 
     // Sync with global config on load - but NOT while saving
     useEffect(() => {
@@ -60,7 +62,7 @@ const GameConfigTuner = () => {
         if (isSaving) return;
         setIsSaving(true);
         try {
-            const promises = [];
+            const configsList = [];
             
             // Only update sections that exist in localConfig
             const sections = [
@@ -71,16 +73,16 @@ const GameConfigTuner = () => {
 
             for (const section of sections) {
                 if (localConfig[section]) {
-                    promises.push(updateConfigValue(section, localConfig[section]));
+                    configsList.push({ key: section, value: localConfig[section] });
                 }
             }
 
-            const results = await Promise.all(promises);
-            const allSuccess = results.every(r => r === true);
+            const success = await updateConfigsBulk(configsList);
 
-            if (allSuccess) {
+            if (success) {
                 showToast('บันทึกการตั้งค่าทั้งหมดเรียบร้อย 🎮', 'success');
                 setIsDirty(false);
+                setSyncVersion(prev => prev + 1);
             } else {
                 showToast('การบันทึกบางส่วนล้มเหลว กรุณาลองใหม่', 'warning');
             }
@@ -160,6 +162,9 @@ const GameConfigTuner = () => {
                     </motion.button>
                 </div>
             </motion.div>
+
+            {/* Database Sync Status & Repair Panel */}
+            <DBSyncCenter key={syncVersion} onSyncSuccess={refreshConfig} />
 
             {/* Tab Navigation - Sliding Pill */}
             <div className="p-1.5 bg-white/60 backdrop-blur-md rounded-2xl border border-white/20 shadow-sm overflow-x-auto">

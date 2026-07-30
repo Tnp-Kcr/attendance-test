@@ -1,5 +1,6 @@
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { MasterOption, Reward, DashboardConfig } from '../types';
 import { useMasterData } from './useMasterData';
 import { useRewards } from './useRewards';
@@ -28,9 +29,54 @@ export const useMasterDataView = () => {
     const { rewards, isLoading: rewardsLoading, addReward, updateReward, deleteReward } = useRewards(null);
     const { configs: dashboardConfigs, isLoading: dashboardLoading, updateConfig: updateDashboardConfig } = useDashboardConfig();
     const maintenance = useMaintenance();
+    const [searchParams, setSearchParams] = useSearchParams();
 
     // --- Local State ---
-    const [activeTab, setActiveTab] = useState<MasterTab>('STATUS');
+    const [activeTab, setActiveTabState] = useState<MasterTab>(() => {
+        const queryTab = searchParams.get('tab') as MasterTab;
+        return queryTab || 'STATUS';
+    });
+
+    const activeTabsConfig = React.useMemo(() => {
+        const config = masterOptions.find(o => o.type === 'MASTER_DATA_CONFIG' && o.key === 'ACTIVE_TABS');
+        if (!config) return null;
+        try {
+            const parsed = JSON.parse(config.label);
+            return Array.isArray(parsed) ? (parsed as string[]) : null;
+        } catch (e) {
+            console.error("Failed to parse master data active tabs config", e);
+            return null;
+        }
+    }, [masterOptions]);
+
+    // Ensure activeTab matches activeTabsConfig if configuration is present
+    useEffect(() => {
+        if (activeTabsConfig && activeTabsConfig.length > 0) {
+            const queryTab = searchParams.get('tab') as MasterTab;
+            if (queryTab && activeTabsConfig.includes(queryTab)) {
+                if (activeTab !== queryTab) {
+                    setActiveTabState(queryTab);
+                }
+            } else if (!activeTabsConfig.includes(activeTab)) {
+                const firstValid = activeTabsConfig[0] as MasterTab;
+                setActiveTabState(firstValid);
+                setSearchParams(prev => {
+                    const next = new URLSearchParams(prev);
+                    next.set('tab', firstValid);
+                    return next;
+                }, { replace: true });
+            }
+        }
+    }, [activeTabsConfig, searchParams, activeTab]);
+
+    const setActiveTab = (tab: MasterTab) => {
+        setActiveTabState(tab);
+        setSearchParams(prev => {
+            const next = new URLSearchParams(prev);
+            next.set('tab', tab);
+            return next;
+        }, { replace: true });
+    };
     
     // Form States
     const [isEditing, setIsEditing] = useState(false);
@@ -203,6 +249,7 @@ export const useMasterDataView = () => {
         rewards, rewardsLoading, deleteReward,
         dashboardConfigs, dashboardLoading,
         filteredOptions,
+        activeTabsConfig,
         
         // Maintenance Hook Access
         maintenance,

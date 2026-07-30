@@ -38,6 +38,10 @@ export const useAttendanceStats = (userId: string) => {
         const configData = masterOptions.filter(o => o.type === 'WORK_CONFIG');
         const startTimeStr = configData?.find(c => c.key === 'START_TIME')?.label || '10:00';
         const buffer = parseInt(configData?.find(c => c.key === 'LATE_BUFFER')?.label || '0');
+        const multipleShifts = {
+            enabled: configData?.find(c => c.key === 'MULTIPLE_SHIFTS_ENABLED' || c.key === 'MULTIPLE_SHIFTS_ENABLE')?.label === 'true',
+            shiftsList: configData?.find(c => c.key === 'MULTIPLE_SHIFTS_LIST')?.label || ''
+        };
 
         let lateCount = 0;
         let onTimeCount = 0;
@@ -47,7 +51,7 @@ export const useAttendanceStats = (userId: string) => {
             const summary = getAttendanceSummary(
                 log.checkInTime,
                 log.checkOutTime,
-                { startTime: startTimeStr, buffer, minHours: 9 }
+                { startTime: startTimeStr, buffer, minHours: 9, note: log.note, multipleShifts }
             );
 
             if (summary.isLate) {
@@ -86,7 +90,7 @@ export const useAttendanceStats = (userId: string) => {
             // Exclude OVERTIME and corrections from being treated as actual leaves
             const approvedLeave = leaveRequests?.find(req => {
                 if (req.userId !== userId || req.status !== 'APPROVED') return false;
-                if (['OVERTIME', 'LATE_ENTRY', 'FORGOT_CHECKIN', 'FORGOT_CHECKOUT', 'FORGOT_BOTH'].includes(req.type)) return false;
+                if (['OVERTIME', 'LATE_ENTRY', 'FORGOT_CHECKIN', 'FORGOT_CHECKOUT', 'FORGOT_BOTH', 'OUT_OF_RANGE_CHECKOUT'].includes(req.type)) return false;
                 const s = format(new Date(req.startDate), 'yyyy-MM-dd');
                 const e = format(new Date(req.endDate), 'yyyy-MM-dd');
                 return dateStr >= s && dateStr <= e;
@@ -131,7 +135,7 @@ export const useAttendanceStats = (userId: string) => {
                     const summary = getAttendanceSummary(
                         log.checkInTime,
                         log.checkOutTime,
-                        { startTime: startTimeStr, buffer, minHours: 9 }
+                        { startTime: startTimeStr, buffer, minHours: 9, note: log.note, multipleShifts }
                     );
 
                     const isLate = log.status === 'LATE' || summary.isLate;
@@ -182,7 +186,7 @@ export const useAttendanceStats = (userId: string) => {
                     const summary = getAttendanceSummary(
                         log.checkInTime,
                         log.checkOutTime,
-                        { startTime: startTimeStr, buffer, minHours: 9 }
+                        { startTime: startTimeStr, buffer, minHours: 9, note: log.note, multipleShifts }
                     );
 
                     const isLate = log.status === 'LATE' || summary.isLate;

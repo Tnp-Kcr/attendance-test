@@ -28,7 +28,7 @@ BEGIN
     END IF;
 
     -- B. Check calendar exceptions (Highest Priority)
-    SELECT * INTO is_exception FROM public.calendar_exceptions WHERE date = check_date::TEXT LIMIT 1;
+    SELECT * INTO is_exception FROM public.calendar_exceptions WHERE date = check_date LIMIT 1;
     IF is_exception IS NOT NULL THEN
         RETURN is_exception.type = 'WORK_DAY';
     END IF;
@@ -60,6 +60,11 @@ $$ LANGUAGE plpgsql SECURITY DEFINER;
 INSERT INTO public.master_options (type, key, label, color, is_active, sort_order)
 VALUES 
     ('WORK_CONFIG', 'DAILY_SUMMARY_DELAY_HOURS', '1', '', true, 7)
+ON CONFLICT (type, key) DO NOTHING;
+
+INSERT INTO public.master_options (type, key, label, color, is_active, sort_order)
+VALUES 
+    ('WORK_CONFIG', 'DAILY_SUMMARY_TIME', '18:00', '', true, 7)
 ON CONFLICT (type, key) DO NOTHING;
 
 INSERT INTO public.master_options (type, key, label, color, is_active, sort_order)
@@ -98,6 +103,7 @@ DECLARE
     leave_type_label TEXT;
     checkin_time_local TIME;
     admin_user_id UUID;
+    app_name_val TEXT;
     message_content TEXT;
 BEGIN
     -- Determine current date in Thailand (Asia/Bangkok timezone) to remain server-independent
@@ -107,6 +113,22 @@ BEGIN
     SELECT label INTO start_time_val FROM public.master_options WHERE type = 'WORK_CONFIG' AND key = 'START_TIME' LIMIT 1;
     SELECT label INTO late_buffer_val FROM public.master_options WHERE type = 'WORK_CONFIG' AND key = 'LATE_BUFFER' LIMIT 1;
     SELECT label INTO destination_val FROM public.master_options WHERE type = 'WORK_CONFIG' AND key = 'LINE_SUMMARY_DESTINATION' LIMIT 1;
+
+    -- Fetch company / system name from master_options (or default)
+    SELECT label INTO app_name_val 
+    FROM public.master_options 
+    WHERE key IN ('COMPANY_NAME', 'SYSTEM_NAME', 'APP_NAME') 
+      AND label IS NOT NULL AND label != '' 
+    ORDER BY CASE key 
+        WHEN 'COMPANY_NAME' THEN 1 
+        WHEN 'SYSTEM_NAME' THEN 2 
+        WHEN 'APP_NAME' THEN 3 
+        ELSE 4 END 
+    LIMIT 1;
+
+    IF app_name_val IS NULL OR app_name_val = '' THEN
+        app_name_val := 'Juijui Planner';
+    END IF;
 
     -- Fallbacks
     IF start_time_val IS NULL THEN start_time_val := '10:00'; END IF;
@@ -146,7 +168,7 @@ BEGIN
 
     -- Loop through active users (exclude ADMIN from attendance tracking)
     FOR profile_rec IN 
-        SELECT id, full_name 
+        SELECT id, full_name, phone_number 
         FROM public.profiles 
         WHERE is_active = TRUE AND role != 'ADMIN'
         ORDER BY full_name ASC
@@ -215,11 +237,22 @@ BEGIN
                 ELSE
                     -- Absent
                     absent_count := absent_count + 1;
-                    IF absent_list = '' THEN
-                        absent_list := '• ' || profile_rec.full_name;
-                    ELSE
-                        absent_list := absent_list || E'\n• ' || profile_rec.full_name;
-                    END IF;
+                    
+                    DECLARE
+                        phone_suffix TEXT := '';
+                    BEGIN
+                        IF profile_rec.phone_number IS NOT NULL AND profile_rec.phone_number != '' THEN
+                            phone_suffix := ' (โทร. ' || profile_rec.phone_number || ') 📞';
+                        ELSE
+                            phone_suffix := ' (ไม่ระบุเบอร์)';
+                        END IF;
+
+                        IF absent_list = '' THEN
+                            absent_list := '• ' || profile_rec.full_name || phone_suffix;
+                        ELSE
+                            absent_list := absent_list || E'\n• ' || profile_rec.full_name || phone_suffix;
+                        END IF;
+                    END;
                 END IF;
             END IF;
         END IF;
@@ -233,11 +266,11 @@ BEGIN
 
     -- Construct message
     message_content := '📊 สรุปรายงานการเข้างานประจำวันที่ ' || to_char(cur_date, 'DD/MM/YYYY') || E'\n\n' ||
-                       '🟢 มาปกติ (' || ontime_count::TEXT || ' คน):\n' || ontime_list || E'\n\n' ||
-                       '🟡 มาสาย (' || late_count::TEXT || ' คน):\n' || late_list || E'\n\n' ||
-                       '🔵 ลา (' || leave_count::TEXT || ' คน):\n' || leave_list || E'\n\n' ||
-                       '🔴 ขาดงาน / ยังไม่เช็คอิน (' || absent_count::TEXT || ' คน):\n' || absent_list || E'\n\n' ||
-                       'ระบบสรุปรายงานอัตโนมัติ Juijui Planner';
+                       '🟢 มาปกติ (' || ontime_count::TEXT || E' คน):\n' || ontime_list || E'\n\n' ||
+                       '🟡 มาสาย (' || late_count::TEXT || E' คน):\n' || late_list || E'\n\n' ||
+                       '🔵 ลา (' || leave_count::TEXT || E' คน):\n' || leave_list || E'\n\n' ||
+                       '🔴 ขาดงาน / ยังไม่เช็คอิน (' || absent_count::TEXT || E' คน):\n' || absent_list || E'\n\n' ||
+                       'ระบบสรุปรายงานอัตโนมัติ ' || app_name_val;
 
     -- Insert into notifications with type = 'DAILY_SUMMARY'
     -- This will trigger the Edge Function webhook automatically
@@ -265,6 +298,7 @@ $$ LANGUAGE plpgsql SECURITY DEFINER;
 CREATE OR REPLACE FUNCTION public.recalculate_and_reschedule_summary_cron()
 RETURNS trigger AS $$
 DECLARE
+    summary_time_val TEXT;
     start_time_val TEXT;
     delay_hours_val TEXT;
     start_time_parsed TIME;
@@ -275,37 +309,39 @@ DECLARE
     utc_minute INT;
     cron_expr TEXT;
 BEGIN
-    -- Check if we are updating START_TIME or DAILY_SUMMARY_DELAY_HOURS under WORK_CONFIG type
-    IF (NEW.type = 'WORK_CONFIG' AND (NEW.key = 'START_TIME' OR NEW.key = 'DAILY_SUMMARY_DELAY_HOURS')) THEN
-        -- Fetch START_TIME from database
-        SELECT label INTO start_time_val FROM public.master_options WHERE type = 'WORK_CONFIG' AND key = 'START_TIME' LIMIT 1;
-        -- Fetch DAILY_SUMMARY_DELAY_HOURS from database
-        SELECT label INTO delay_hours_val FROM public.master_options WHERE type = 'WORK_CONFIG' AND key = 'DAILY_SUMMARY_DELAY_HOURS' LIMIT 1;
+    -- Check if we are updating START_TIME, DAILY_SUMMARY_DELAY_HOURS, or DAILY_SUMMARY_TIME under WORK_CONFIG type
+    IF (NEW.type = 'WORK_CONFIG' AND (NEW.key = 'START_TIME' OR NEW.key = 'DAILY_SUMMARY_DELAY_HOURS' OR NEW.key = 'DAILY_SUMMARY_TIME')) THEN
+        -- Fetch DAILY_SUMMARY_TIME from database
+        SELECT label INTO summary_time_val FROM public.master_options WHERE type = 'WORK_CONFIG' AND key = 'DAILY_SUMMARY_TIME' LIMIT 1;
 
-        -- Fallbacks
-        IF start_time_val IS NULL THEN
-            start_time_val := '10:00';
+        IF summary_time_val IS NOT NULL AND summary_time_val != '' THEN
+            BEGIN
+                local_alert_time := summary_time_val::TIME;
+            EXCEPTION WHEN OTHERS THEN
+                local_alert_time := '18:00'::TIME;
+            END;
+        ELSE
+            -- Fallback to START_TIME + delay calculation
+            SELECT label INTO start_time_val FROM public.master_options WHERE type = 'WORK_CONFIG' AND key = 'START_TIME' LIMIT 1;
+            SELECT label INTO delay_hours_val FROM public.master_options WHERE type = 'WORK_CONFIG' AND key = 'DAILY_SUMMARY_DELAY_HOURS' LIMIT 1;
+
+            IF start_time_val IS NULL THEN start_time_val := '10:00'; END IF;
+            IF delay_hours_val IS NULL THEN delay_hours_val := '1'; END IF;
+
+            BEGIN
+                start_time_parsed := start_time_val::TIME;
+            EXCEPTION WHEN OTHERS THEN
+                start_time_parsed := '10:00'::TIME;
+            END;
+
+            BEGIN
+                delay_hours := delay_hours_val::NUMERIC;
+            EXCEPTION WHEN OTHERS THEN
+                delay_hours := 1;
+            END;
+
+            local_alert_time := start_time_parsed + (delay_hours || ' hours')::INTERVAL;
         END IF;
-        IF delay_hours_val IS NULL THEN
-            delay_hours_val := '1';
-        END IF;
-
-        -- Parse START_TIME as TIME
-        BEGIN
-            start_time_parsed := start_time_val::TIME;
-        EXCEPTION WHEN OTHERS THEN
-            start_time_parsed := '10:00'::TIME;
-        END;
-
-        -- Parse DAILY_SUMMARY_DELAY_HOURS as NUMERIC
-        BEGIN
-            delay_hours := delay_hours_val::NUMERIC;
-        EXCEPTION WHEN OTHERS THEN
-            delay_hours := 1;
-        END;
-
-        -- Calculate local alert time: START_TIME + delay_hours
-        local_alert_time := start_time_parsed + (delay_hours || ' hours')::INTERVAL;
 
         -- Convert local alert time to UTC to set up pg_cron
         utc_alert_timestamp := (CURRENT_DATE + local_alert_time) AT TIME ZONE 'Asia/Bangkok' AT TIME ZONE 'UTC';
@@ -345,6 +381,7 @@ EXECUTE FUNCTION public.recalculate_and_reschedule_summary_cron();
 -- 6. Trigger Initial Execution to establish the initial scheduling right now
 DO $$
 DECLARE
+    summary_time_val TEXT;
     start_time_val TEXT;
     delay_hours_val TEXT;
     start_time_parsed TIME;
@@ -355,29 +392,36 @@ DECLARE
     utc_minute INT;
     cron_expr TEXT;
 BEGIN
-    SELECT label INTO start_time_val FROM public.master_options WHERE type = 'WORK_CONFIG' AND key = 'START_TIME' LIMIT 1;
-    SELECT label INTO delay_hours_val FROM public.master_options WHERE type = 'WORK_CONFIG' AND key = 'DAILY_SUMMARY_DELAY_HOURS' LIMIT 1;
+    SELECT label INTO summary_time_val FROM public.master_options WHERE type = 'WORK_CONFIG' AND key = 'DAILY_SUMMARY_TIME' LIMIT 1;
 
-    IF start_time_val IS NULL THEN
-        start_time_val := '10:00';
+    IF summary_time_val IS NOT NULL AND summary_time_val != '' THEN
+        BEGIN
+            local_alert_time := summary_time_val::TIME;
+        EXCEPTION WHEN OTHERS THEN
+            local_alert_time := '18:00'::TIME;
+        END;
+    ELSE
+        SELECT label INTO start_time_val FROM public.master_options WHERE type = 'WORK_CONFIG' AND key = 'START_TIME' LIMIT 1;
+        SELECT label INTO delay_hours_val FROM public.master_options WHERE type = 'WORK_CONFIG' AND key = 'DAILY_SUMMARY_DELAY_HOURS' LIMIT 1;
+
+        IF start_time_val IS NULL THEN start_time_val := '10:00'; END IF;
+        IF delay_hours_val IS NULL THEN delay_hours_val := '1'; END IF;
+
+        BEGIN
+            start_time_parsed := start_time_val::TIME;
+        EXCEPTION WHEN OTHERS THEN
+            start_time_parsed := '10:00'::TIME;
+        END;
+
+        BEGIN
+            delay_hours := delay_hours_val::NUMERIC;
+        EXCEPTION WHEN OTHERS THEN
+            delay_hours := 1;
+        END;
+
+        local_alert_time := start_time_parsed + (delay_hours || ' hours')::INTERVAL;
     END IF;
-    IF delay_hours_val IS NULL THEN
-        delay_hours_val := '1';
-    END IF;
 
-    BEGIN
-        start_time_parsed := start_time_val::TIME;
-    EXCEPTION WHEN OTHERS THEN
-        start_time_parsed := '10:00'::TIME;
-    END;
-
-    BEGIN
-        delay_hours := delay_hours_val::NUMERIC;
-    EXCEPTION WHEN OTHERS THEN
-        delay_hours := 1;
-    END;
-
-    local_alert_time := start_time_parsed + (delay_hours || ' hours')::INTERVAL;
     utc_alert_timestamp := (CURRENT_DATE + local_alert_time) AT TIME ZONE 'Asia/Bangkok' AT TIME ZONE 'UTC';
     utc_hour := EXTRACT(HOUR FROM utc_alert_timestamp);
     utc_minute := EXTRACT(MINUTE FROM utc_alert_timestamp);

@@ -1,12 +1,18 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { FileText, XCircle } from 'lucide-react';
+import { FileText, XCircle, Clock } from 'lucide-react';
+import { useSearchParams } from 'react-router-dom';
 import { LeaveRequest } from '../../../types/attendance';
+import { ATTENDANCE_REGISTRY } from '../../../constants/attendanceRegistry';
 import { useGlobalDialog } from '../../../context/GlobalDialogContext';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useMasterData } from '../../../hooks/useMasterData';
+import { ApproveRequestParams } from '../../../hooks/useAdminApprovals';
+import { getMaxShiftWithBuffer } from '../../../lib/attendanceUtils';
+import { parseReason } from './request-detail/utils';
 import { RequestDetailModal } from './RequestDetailModal';
 import MultiDatePickerModal from '../../ui/MultiDatePickerModal';
+import TimePickerModal from '../../ui/TimePickerModal';
 
 // Modularized Components
 import { ApprovalFilterBar } from './approval/ApprovalFilterBar';
@@ -19,13 +25,8 @@ interface LeaveApprovalListProps {
     isLoading: boolean;
     isLoadingHistorical?: boolean;
     fetchRequestsForRange?: (start?: Date, end?: Date) => Promise<LeaveRequest[]>;
-    onApprove: (
-        req: LeaveRequest, 
-        customOtHours?: number, 
-        customStartTime?: string, 
-        customEndTime?: string
-    ) => Promise<void>;
-    onReject: (id: string, reason: string) => Promise<void>;
+    onApprove: (params: ApproveRequestParams) => Promise<void>;
+    onReject: (id: string, reason: string, customCheckInTime?: string, hpPenalty?: number, rejectionMode?: 'ABSENT' | 'ACTION_REQUIRED' | 'KEEP_WORKING') => Promise<void>;
 }
 
 type HistoryFilter = 'ALL' | 'APPROVED' | 'REJECTED';
@@ -40,17 +41,16 @@ const LeaveApprovalList: React.FC<LeaveApprovalListProps> = ({
     onReject 
 }) => {
     const { showAlert, showConfirm } = useGlobalDialog();
-    const { annualHolidays, calendarExceptions } = useMasterData();
+    const { annualHolidays, calendarExceptions, masterOptions } = useMasterData();
+    const [searchParams, setSearchParams] = useSearchParams();
+    const highlightReqId = searchParams.get('highlightReqId') || searchParams.get('id');
+
     const [filterStatus, setFilterStatus] = useState<'PENDING' | 'HISTORY'>('PENDING');
     const [historySubFilter, setHistorySubFilter] = useState<HistoryFilter>('ALL');
     
-    // State for Rejection Modal
-    const [rejectingId, setRejectingId] = useState<string | null>(null);
-    const [rejectionReason, setRejectionReason] = useState('');
-    const [isSubmitting, setIsSubmitting] = useState(false);
-    
     // State for Request Detail Modal
     const [selectedRequest, setSelectedRequest] = useState<LeaveRequest | null>(null);
+    const [isRejectModeRequested, setIsRejectModeRequested] = useState(false);
 
     const [activeCategory, setActiveCategory] = useState<RequestCategory>('ALL');
 
@@ -90,25 +90,33 @@ const LeaveApprovalList: React.FC<LeaveApprovalListProps> = ({
     };
 
     // On-Demand Fetching Effect for Monthly Filters
+    const currentCacheKey = `${selectedYear}-${selectedMonth}`;
+    const isCurrentMonthCached = !!historicalCache[currentCacheKey];
+
     useEffect(() => {
         if (!isMonthFilterEnabled || isCustomRangeEnabled || !fetchRequestsForRange) return;
         if (!isOutsideSixtyDays(selectedMonth, selectedYear)) return;
-
-        const key = `${selectedYear}-${selectedMonth}`;
-        if (historicalCache[key]) return; // already cached
+        if (isCurrentMonthCached) return; // already cached
 
         const loadHistorical = async () => {
-            const startOfSelectedMonth = new Date(selectedYear, selectedMonth, 1);
-            const endOfSelectedMonth = new Date(selectedYear, selectedMonth + 1, 0, 23, 59, 59);
-            const data = await fetchRequestsForRange(startOfSelectedMonth, endOfSelectedMonth);
-            setHistoricalCache(prev => ({
-                ...prev,
-                [key]: data
-            }));
+            setIsLocalLoading(true);
+            try {
+                const startOfSelectedMonth = new Date(selectedYear, selectedMonth, 1);
+                const endOfSelectedMonth = new Date(selectedYear, selectedMonth + 1, 0, 23, 59, 59);
+                const data = await fetchRequestsForRange(startOfSelectedMonth, endOfSelectedMonth);
+                setHistoricalCache(prev => ({
+                    ...prev,
+                    [currentCacheKey]: data
+                }));
+            } catch (err) {
+                console.error("Failed to fetch historical requests", err);
+            } finally {
+                setIsLocalLoading(false);
+            }
         };
 
         loadHistorical();
-    }, [selectedMonth, selectedYear, isMonthFilterEnabled, isCustomRangeEnabled, fetchRequestsForRange, historicalCache, sixtyDaysAgo]);
+    }, [selectedMonth, selectedYear, isMonthFilterEnabled, isCustomRangeEnabled, fetchRequestsForRange, isCurrentMonthCached, sixtyDaysAgo]);
 
     // On-Demand Fetching Effect for Show All (Full History)
     useEffect(() => {
@@ -137,6 +145,7 @@ const LeaveApprovalList: React.FC<LeaveApprovalListProps> = ({
         setIsCustomRangeEnabled(true);
         setIsMonthFilterEnabled(false);
         setCurrentPage(1);
+        setActiveCategory('ALL');
 
         if (fetchRequestsForRange) {
             setIsLocalLoading(true);
@@ -176,6 +185,36 @@ const LeaveApprovalList: React.FC<LeaveApprovalListProps> = ({
         });
     }, [requests, historicalCache, selectedMonth, selectedYear, isMonthFilterEnabled, isCustomRangeEnabled, customRangeRequests, allRequestsLoaded, sixtyDaysAgo]);
 
+    // Auto-adjust category, filter status, and open modal based on tab or highlighted request ID
+    useEffect(() => {
+        const tabParam = searchParams.get('tab');
+        if (highlightReqId) {
+            setActiveCategory('ALL');
+            const matchingReq = combinedRequests.find(r => r.id === highlightReqId);
+            if (matchingReq) {
+                if (matchingReq.status === 'PENDING') {
+                    setFilterStatus('PENDING');
+                } else {
+                    setFilterStatus('HISTORY');
+                    if (matchingReq.status === 'APPROVED') {
+                        setHistorySubFilter('APPROVED');
+                    } else if (matchingReq.status === 'REJECTED') {
+                        setHistorySubFilter('REJECTED');
+                    }
+                }
+                
+                // Auto-open modal if not already open for this request
+                if (!selectedRequest || selectedRequest.id !== highlightReqId) {
+                    setSelectedRequest(matchingReq);
+                }
+            }
+        } else if (tabParam === 'ot-requests') {
+            setActiveCategory('OT');
+        } else if (tabParam === 'leave-requests') {
+            setActiveCategory('LEAVE');
+        }
+    }, [highlightReqId, combinedRequests, searchParams, selectedRequest]);
+
     const isCategoryDimmed = (cat: 'LEAVE' | 'LATE_FORGOT' | 'OT') => {
         return activeCategory !== 'ALL' && activeCategory !== cat;
     };
@@ -210,29 +249,40 @@ const LeaveApprovalList: React.FC<LeaveApprovalListProps> = ({
         return base;
     }, [combinedRequests, filterStatus, historySubFilter, isCustomRangeEnabled, customRange, isMonthFilterEnabled, selectedMonth, selectedYear]);
 
-    const counts = useMemo(() => {
-        const leaves = ['SICK', 'VACATION', 'PERSONAL', 'EMERGENCY', 'WFH'];
-        const lateForgot = ['LATE_ENTRY', 'FORGOT_CHECKIN', 'FORGOT_CHECKOUT', 'FORGOT_BOTH'];
-        const ot = ['OVERTIME'];
+    const { leaves, lateForgot, ot } = useMemo(() => {
+        const leavesList: string[] = [];
+        const lateForgotList: string[] = [];
+        const otList: string[] = [];
 
+        Object.values(ATTENDANCE_REGISTRY).forEach(item => {
+            if (item.id === 'OVERTIME') {
+                otList.push(item.id);
+            } else if (item.category === 'CORRECTION' || item.id === 'GPS_SPOOF_APPEAL') {
+                lateForgotList.push(item.id);
+            } else {
+                leavesList.push(item.id);
+            }
+        });
+
+        return { leaves: leavesList, lateForgot: lateForgotList, ot: otList };
+    }, []);
+
+    const counts = useMemo(() => {
         return {
             LEAVE: tabRequests.filter(r => leaves.includes(r.type)).length,
             LATE_FORGOT: tabRequests.filter(r => lateForgot.includes(r.type)).length,
             OT: tabRequests.filter(r => ot.includes(r.type)).length
         };
-    }, [tabRequests]);
+    }, [tabRequests, leaves, lateForgot, ot]);
 
     const filteredRequests = useMemo(() => {
         let base = [...tabRequests];
 
         if (activeCategory === 'LEAVE') {
-            const leaves = ['SICK', 'VACATION', 'PERSONAL', 'EMERGENCY', 'WFH'];
             base = base.filter(r => leaves.includes(r.type));
         } else if (activeCategory === 'LATE_FORGOT') {
-            const lateForgot = ['LATE_ENTRY', 'FORGOT_CHECKIN', 'FORGOT_CHECKOUT', 'FORGOT_BOTH'];
             base = base.filter(r => lateForgot.includes(r.type));
         } else if (activeCategory === 'OT') {
-            const ot = ['OVERTIME'];
             base = base.filter(r => ot.includes(r.type));
         }
 
@@ -243,7 +293,7 @@ const LeaveApprovalList: React.FC<LeaveApprovalListProps> = ({
         });
 
         return base;
-    }, [tabRequests, activeCategory]);
+    }, [tabRequests, activeCategory, leaves, lateForgot, ot]);
 
     const paginatedRequests = useMemo(() => {
         if (filterStatus === 'PENDING') {
@@ -262,6 +312,16 @@ const LeaveApprovalList: React.FC<LeaveApprovalListProps> = ({
             setCurrentPage(totalPages);
         }
     }, [totalPages, currentPage]);
+
+    // Jump to page containing highlightReqId in HISTORY mode
+    useEffect(() => {
+        if (!highlightReqId || filterStatus !== 'HISTORY') return;
+        const index = filteredRequests.findIndex(r => r.id === highlightReqId);
+        if (index !== -1) {
+            const page = Math.floor(index / itemsPerPage) + 1;
+            setCurrentPage(page);
+        }
+    }, [highlightReqId, filteredRequests, filterStatus, itemsPerPage]);
 
     const handlePrevMonth = () => {
         if (selectedMonth === 0) {
@@ -286,21 +346,40 @@ const LeaveApprovalList: React.FC<LeaveApprovalListProps> = ({
     const showLoading = isLoading || isLoadingHistorical || isLocalLoading;
 
     const handleRejectClick = (id: string) => {
-        setRejectingId(id);
-        setRejectionReason('');
+        const req = requests.find(r => r.id === id);
+        if (req) {
+            setSelectedRequest(req);
+            setIsRejectModeRequested(true);
+        }
     };
 
-    const handleConfirmReject = async () => {
-        if (!rejectingId) return;
-        if (!rejectionReason.trim()) {
-            showAlert('กรุณาระบุเหตุผลในการปฏิเสธ', 'ข้อมูลไม่ครบ');
-            return;
+    const handleApproveClick = async (req: LeaveRequest, customStartTime?: string) => {
+        const parsed = parseReason(req.reason || '');
+        const targetTime = (customStartTime && customStartTime !== 'DIRECT_APPROVE' && customStartTime !== 'ADJUST_TIME')
+            ? customStartTime
+            : (parsed.time || undefined);
+
+        // Admin override: bypass max shift/buffer time checks to allow full flexibility in manual approval
+        try {
+            if (customStartTime === 'DIRECT_APPROVE') {
+                if (await showConfirm(`คุณต้องการอนุมัติคำขอลงเวลานี้ตามที่ขอมา${targetTime ? ` (${targetTime} น.)` : ''} ใช่หรือไม่?`)) {
+                    await onApprove({ request: req, customStartTime: targetTime });
+                }
+            } else if (customStartTime === 'ADJUST_TIME') {
+                setSelectedRequest(req);
+            } else if (req.type === 'OVERTIME' || req.type === 'FORGOT_CHECKIN') {
+                setSelectedRequest(req);
+            } else {
+                if (await showConfirm(`คุณต้องการอนุมัติคำขอนี้${targetTime ? ` (เวลากะ ${targetTime} น.)` : ''} ใช่หรือไม่?`)) {
+                    await onApprove({ request: req, customStartTime: targetTime });
+                }
+            }
+        } catch (e: any) {
+            console.error(e);
+            await showAlert(e?.message || 'เกิดข้อผิดพลาดในการอนุมัติ', 'ไม่สามารถอนุมัติได้');
         }
-        setIsSubmitting(true);
-        await onReject(rejectingId, rejectionReason);
-        setIsSubmitting(false);
-        setRejectingId(null);
     };
+
 
     return (
         <div className="space-y-4">
@@ -353,17 +432,18 @@ const LeaveApprovalList: React.FC<LeaveApprovalListProps> = ({
                         <p className="text-xs mt-1">รายการใหม่ๆ จะปรากฏที่นี่เมื่อพนักงานส่งคำขอ</p>
                     </motion.div>
                 ) : (
-                    <div className="space-y-4">
+                    <motion.div layout className="space-y-4">
                         <AnimatePresence mode="popLayout">
                             {paginatedRequests.map((req) => (
                                 <ApprovalRequestCard 
                                     key={req.id}
                                     request={req}
-                                    onApprove={onApprove}
+                                    onApprove={handleApproveClick}
                                     onRejectClick={handleRejectClick}
                                     onViewDetail={setSelectedRequest}
                                     annualHolidays={annualHolidays}
                                     calendarExceptions={calendarExceptions}
+                                    isHighlighted={req.id === highlightReqId}
                                 />
                             ))}
                         </AnimatePresence>
@@ -378,63 +458,9 @@ const LeaveApprovalList: React.FC<LeaveApprovalListProps> = ({
                                 itemsPerPage={itemsPerPage}
                             />
                         )}
-                    </div>
+                    </motion.div>
                 )}
             </div>
-
-            {/* Rejection Reason Modal */}
-            {rejectingId && createPortal(
-                <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 animate-in fade-in">
-                    <motion.div 
-                        initial={{ opacity: 0, scale: 0.9, y: 20 }}
-                        animate={{ opacity: 1, scale: 1, y: 0 }}
-                        className="bg-white w-full max-w-sm rounded-[2.5rem] shadow-2xl p-8 border-2 border-red-100 relative overflow-hidden"
-                    >
-                        <div className="absolute top-0 right-0 w-32 h-32 bg-red-50 rounded-full -mr-16 -mt-16 opacity-50"></div>
-                        
-                        <div className="relative">
-                            <div className="w-16 h-16 bg-red-100 rounded-3xl flex items-center justify-center mb-6">
-                                <XCircle className="w-8 h-8 text-red-500" />
-                            </div>
-                            
-                            <h3 className="text-xl font-black text-gray-800 mb-2">ระบุเหตุผลการปฏิเสธ</h3>
-                            <p className="text-sm text-gray-500 mb-6 font-medium">เพื่อให้พนักงานทราบเหตุผลและปรับปรุงแก้ไขในครั้งถัดไป</p>
-                            
-                            <textarea 
-                                className="w-full p-4 border-2 border-gray-100 rounded-3xl text-sm focus:ring-4 focus:ring-red-50 focus:border-red-200 outline-none resize-none mb-6 transition-all"
-                                rows={4}
-                                placeholder="เช่น เอกสารไม่ครบ, วันลาหมด, หรือเหตุผลอื่นๆ..."
-                                value={rejectionReason}
-                                onChange={(e) => setRejectionReason(e.target.value)}
-                                autoFocus
-                                id="rejection-modal-reason-textarea"
-                            />
-                            
-                            <div className="flex gap-3">
-                                <button 
-                                    type="button"
-                                    onClick={() => setRejectingId(null)}
-                                    disabled={isSubmitting}
-                                    className="flex-1 py-3.5 bg-gray-50 hover:bg-gray-100 text-gray-500 rounded-2xl text-xs font-black transition-colors outline-none cursor-pointer border border-gray-100"
-                                    id="rejection-modal-cancel-btn"
-                                >
-                                    ยกเลิก
-                                </button>
-                                <button 
-                                    type="button"
-                                    onClick={handleConfirmReject}
-                                    disabled={isSubmitting}
-                                    className="flex-1 py-3.5 bg-red-500 hover:bg-red-600 text-white rounded-2xl text-xs font-black shadow-lg shadow-red-100 transition-all active:scale-95 disabled:opacity-50 outline-none cursor-pointer"
-                                    id="rejection-modal-submit-btn"
-                                >
-                                    {isSubmitting ? 'กำลังบันทึก...' : 'ยืนยันปฏิเสธ'}
-                                </button>
-                            </div>
-                        </div>
-                    </motion.div>
-                </div>,
-                document.body
-            )}
 
             {/* Request Detail Modal */}
             <AnimatePresence>
@@ -442,9 +468,20 @@ const LeaveApprovalList: React.FC<LeaveApprovalListProps> = ({
                     <RequestDetailModal 
                         request={selectedRequest}
                         isOpen={true}
-                        onClose={() => setSelectedRequest(null)}
+                        onClose={() => {
+                            setSelectedRequest(null);
+                            setIsRejectModeRequested(false);
+                            // Clear highlight parameters from URL so the modal doesn't re-open
+                            setSearchParams(prev => {
+                                const next = new URLSearchParams(prev);
+                                next.delete('highlightReqId');
+                                next.delete('id');
+                                return next;
+                            }, { replace: true });
+                        }}
                         onApprove={onApprove}
                         onReject={onReject}
+                        initialRejectMode={isRejectModeRequested}
                     />
                 )}
             </AnimatePresence>

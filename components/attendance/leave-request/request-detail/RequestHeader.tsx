@@ -10,7 +10,7 @@ interface RequestHeaderProps {
 
 export const RequestHeader: React.FC<RequestHeaderProps> = ({ request, onClose }) => {
     return (
-        <div className="relative bg-gradient-to-r from-slate-50 to-slate-100/50 p-6 border-b border-slate-100 shrink-0">
+        <div className="relative bg-gradient-to-r from-slate-50 to-slate-100/50 p-5 md:p-6 border-b border-slate-100 shrink-0">
             <button 
                 onClick={onClose}
                 className="absolute top-4 right-4 p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-full transition-all"
@@ -42,7 +42,7 @@ export const RequestHeader: React.FC<RequestHeaderProps> = ({ request, onClose }
                     <div className="flex flex-wrap items-center gap-2 mt-2">
                         {getStatusBadge(request.status)}
                         {request.user?.employmentType && (
-                            <span className="text-[10px] bg-slate-200/60 text-slate-600 font-extrabold px-2.5 py-0.5 rounded-md uppercase">
+                            <span className="text-[10px] bg-slate-200/60 text-slate-600 font-bold px-2.5 py-0.5 rounded-md uppercase">
                                 {request.user.employmentType === 'FULL_TIME' ? 'พนักงานประจำ' : request.user.employmentType === 'PROBATION' ? 'ทดลองงาน' : 'เด็กฝึกงาน'}
                             </span>
                         )}

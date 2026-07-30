@@ -31,18 +31,20 @@ export const attendanceService = {
         const { data: leaveData, error: leaveError } = await query;
         if (leaveError) throw leaveError;
 
-        const leaves: LeaveRequest[] = (leaveData || []).map((r: any) => ({
-            id: r.id,
-            userId: r.user_id,
-            type: r.type,
-            startDate: new Date(r.start_date),
-            endDate: new Date(r.end_date),
-            reason: r.reason,
-            attachmentUrl: r.attachment_url,
-            status: r.status as RequestStatus,
-            approverId: r.approver_id,
-            createdAt: new Date(r.created_at),
-            rejectionReason: r.rejection_reason,
+        const leaves: LeaveRequest[] = (leaveData || [])
+            .filter((r: any) => r.type !== 'OVERTIME')
+            .map((r: any) => ({
+                id: r.id,
+                userId: r.user_id,
+                type: r.type,
+                startDate: new Date(r.start_date),
+                endDate: new Date(r.end_date),
+                reason: r.reason,
+                attachmentUrl: r.attachment_url,
+                status: r.status as RequestStatus,
+                approverId: r.approver_id,
+                createdAt: new Date(r.created_at),
+                rejectionReason: r.rejection_reason,
             user: r.profiles ? {
                 id: r.profiles.id,
                 name: r.profiles.full_name,
@@ -81,9 +83,12 @@ export const attendanceService = {
                     startDate: new Date(r.date + 'T' + r.start_time),
                     endDate: new Date(r.date + 'T' + r.end_time),
                     reason: `[OT:${r.duration_hours}hr] ${r.reason}`,
+                    attachmentUrl: r.attachment_url,
                     status: r.status as RequestStatus,
                     createdAt: new Date(r.created_at),
                     rejectionReason: r.rejection_reason,
+                    isFixed: r.is_fixed,
+                    is_fixed: r.is_fixed,
                     user: r.profiles ? {
                         id: r.profiles.id,
                         name: r.profiles.full_name,
@@ -118,9 +123,12 @@ export const attendanceService = {
                     startDate: new Date(r.date + 'T' + r.start_time),
                     endDate: new Date(r.date + 'T' + r.end_time),
                     reason: `[OT:${r.duration_hours}hr] ${r.reason}`,
+                    attachmentUrl: r.attachment_url,
                     status: r.status as RequestStatus,
                     createdAt: new Date(r.created_at),
                     rejectionReason: r.rejection_reason,
+                    isFixed: r.is_fixed,
+                    is_fixed: r.is_fixed,
                     user: undefined // Will be matched with current user at hooks layer if needed
                 }));
             }
@@ -167,6 +175,8 @@ export const attendanceService = {
         computed_payout: number;
         base_salary_at_time: number;
         status: string;
+        attachment_url?: string | null;
+        is_fixed?: boolean;
     }) {
         const { data, error } = await supabase
             .from('ot_requests')
@@ -225,13 +235,27 @@ export const attendanceService = {
             rejection_reason?: string;
         }
     ) {
+        // Fetch the existing reason to check and clean [PROVISIONAL_CHECKOUT]
+        const { data: currentReq, error: fetchError } = await supabase
+            .from('leave_requests')
+            .select('reason')
+            .eq('id', id)
+            .single();
+        if (fetchError) throw fetchError;
+
+        const updateData: any = {
+            status,
+            approver_id: updateFields.approver_id,
+            rejection_reason: updateFields.rejection_reason
+        };
+
+        if (currentReq && currentReq.reason && currentReq.reason.includes('[PROVISIONAL_CHECKOUT]')) {
+            updateData.reason = currentReq.reason.replace('[PROVISIONAL_CHECKOUT]', '').trim();
+        }
+
         const { data, error } = await supabase
             .from('leave_requests')
-            .update({
-                status,
-                approver_id: updateFields.approver_id,
-                rejection_reason: updateFields.rejection_reason
-            })
+            .update(updateData)
             .eq('id', id)
             .select()
             .single();

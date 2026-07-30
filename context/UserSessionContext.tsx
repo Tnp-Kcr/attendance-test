@@ -83,6 +83,7 @@ const mapProfileToUser = (data: any): User => ({
     firstName: data.first_name || '',
     lastName: data.last_name || '',
     nickname: data.nickname || '',
+    username: data.username || '',
     acceptedTermsVersion: data.accepted_terms_version || 0,
     acceptedTermsAt: data.accepted_terms_at ? new Date(data.accepted_terms_at) : null
 });
@@ -124,6 +125,7 @@ const mapDBToUserUpdates = (u: any): Partial<User> => {
     if ('first_name' in u) updates.firstName = u.first_name;
     if ('last_name' in u) updates.lastName = u.last_name;
     if ('nickname' in u) updates.nickname = u.nickname;
+    if ('username' in u) updates.username = u.username;
     if ('accepted_terms_version' in u) updates.acceptedTermsVersion = u.accepted_terms_version;
     if ('accepted_terms_at' in u) updates.acceptedTermsAt = u.accepted_terms_at ? new Date(u.accepted_terms_at) : null;
     if ('start_date' in u) updates.startDate = u.start_date ? new Date(u.start_date) : undefined;
@@ -162,7 +164,9 @@ const mapOtRequest = (data: any) => ({
     rejectionReason: data.rejection_reason,
     baseSalaryAtTime: data.base_salary_at_time ? Number(data.base_salary_at_time) : undefined,
     computedPayout: Number(data.computed_payout || 0),
-    createdAt: new Date(data.created_at)
+    createdAt: new Date(data.created_at),
+    attachmentUrl: data.attachment_url,
+    isFixed: !!data.is_fixed
 });
 
 export const UserSessionProvider: React.FC<{ sessionUser: any, children: React.ReactNode }> = ({ sessionUser, children }) => {
@@ -245,7 +249,7 @@ export const UserSessionProvider: React.FC<{ sessionUser: any, children: React.R
                     ]);
 
                     if (attendanceRes.data) setAttendanceLogs(attendanceRes.data.map(mapAttendanceLog));
-                    if (leavesRes.data) setLeaveRequests(leavesRes.data.map(mapLeaveRequest));
+                    if (leavesRes.data) setLeaveRequests(leavesRes.data.filter((r: any) => r.type !== 'OVERTIME').map(mapLeaveRequest));
                     if (otRes.data) setOtRequests(otRes.data.map(mapOtRequest));
                 }
             }
@@ -267,6 +271,12 @@ export const UserSessionProvider: React.FC<{ sessionUser: any, children: React.R
 
         const isAdmin = currentUserProfile.role === 'ADMIN';
         let isInitialSubscription = true;
+
+        const attendanceFilter = { event: '*', schema: 'public', table: 'attendance_logs' } as const;
+
+        const leaveFilter = { event: '*', schema: 'public', table: 'leave_requests' } as const;
+
+        const otFilter = { event: '*', schema: 'public', table: 'ot_requests' } as const;
 
         // Single Channel for all user session updates
         const channel = supabase.channel(`user-session-hub-${sessionUser.id}`)
@@ -293,55 +303,58 @@ export const UserSessionProvider: React.FC<{ sessionUser: any, children: React.R
                 }
             })
             // 2. Attendance Logs (Scope based on Role)
-            .on('postgres_changes', { 
-                event: '*', 
-                schema: 'public', 
-                table: 'attendance_logs', 
-                filter: isAdmin ? undefined : `user_id=eq.${sessionUser.id}` 
-            }, (payload) => {
+            .on('postgres_changes', attendanceFilter, (payload) => {
                 if (payload.eventType === 'INSERT') {
+                    if (!isAdmin && payload.new.user_id !== sessionUser.id) return;
                     setAttendanceLogs(prev => {
                         if (prev.some(log => log.id === payload.new.id)) return prev;
                         return [...prev, mapAttendanceLog(payload.new)];
                     });
                 } else if (payload.eventType === 'UPDATE') {
-                    setAttendanceLogs(prev => prev.map(log => log.id === payload.new.id ? mapAttendanceLog(payload.new) : log));
+                    setAttendanceLogs(prev => {
+                        if (!isAdmin && payload.new.user_id !== sessionUser.id) {
+                            return prev.filter(log => log.id !== payload.new.id);
+                        }
+                        return prev.map(log => log.id === payload.new.id ? mapAttendanceLog(payload.new) : log);
+                    });
                 } else if (payload.eventType === 'DELETE') {
                     setAttendanceLogs(prev => prev.filter(log => log.id !== payload.old.id));
                 }
             })
             // 3. Leave Requests (Scope based on Role)
-            .on('postgres_changes', { 
-                event: '*', 
-                schema: 'public', 
-                table: 'leave_requests', 
-                filter: isAdmin ? undefined : `user_id=eq.${sessionUser.id}` 
-            }, (payload) => {
+            .on('postgres_changes', leaveFilter, (payload) => {
                 if (payload.eventType === 'INSERT') {
+                    if (!isAdmin && payload.new.user_id !== sessionUser.id) return;
                     setLeaveRequests(prev => {
                         if (prev.some(req => req.id === payload.new.id)) return prev;
                         return [mapLeaveRequest(payload.new), ...prev];
                     });
                 } else if (payload.eventType === 'UPDATE') {
-                    setLeaveRequests(prev => prev.map(req => req.id === payload.new.id ? mapLeaveRequest(payload.new) : req));
+                    setLeaveRequests(prev => {
+                        if (!isAdmin && payload.new.user_id !== sessionUser.id) {
+                            return prev.filter(req => req.id !== payload.new.id);
+                        }
+                        return prev.map(req => req.id === payload.new.id ? mapLeaveRequest(payload.new) : req);
+                    });
                 } else if (payload.eventType === 'DELETE') {
                     setLeaveRequests(prev => prev.filter(req => req.id !== payload.old.id));
                 }
             })
             // 4. Overtime Requests (Scope based on Role)
-            .on('postgres_changes', { 
-                event: '*', 
-                schema: 'public', 
-                table: 'ot_requests', 
-                filter: isAdmin ? undefined : `user_id=eq.${sessionUser.id}` 
-            }, (payload) => {
+            .on('postgres_changes', otFilter, (payload) => {
                 if (payload.eventType === 'INSERT') {
+                    if (!isAdmin && payload.new.user_id !== sessionUser.id) return;
                     setOtRequests(prev => {
                         if (prev.some(req => req.id === payload.new.id)) return prev;
                         return [mapOtRequest(payload.new), ...prev];
                     });
                 } else if (payload.eventType === 'UPDATE') {
-                    setOtRequests(prev => prev.map(req => req.id === payload.new.id ? mapOtRequest(payload.new) : req));
+                    setOtRequests(prev => {
+                        if (!isAdmin && payload.new.user_id !== sessionUser.id) {
+                            return prev.filter(req => req.id !== payload.new.id);
+                        }
+                        return prev.map(req => req.id === payload.new.id ? mapOtRequest(payload.new) : req);
+                    });
                 } else if (payload.eventType === 'DELETE') {
                     setOtRequests(prev => prev.filter(req => req.id !== payload.old.id));
                 }
@@ -411,6 +424,43 @@ export const UserSessionProvider: React.FC<{ sessionUser: any, children: React.R
             if (updates.acceptedTermsVersion !== undefined) payload.accepted_terms_version = updates.acceptedTermsVersion;
             if (updates.acceptedTermsAt !== undefined) payload.accepted_terms_at = updates.acceptedTermsAt ? updates.acceptedTermsAt.toISOString() : null;
 
+            if (updates.email !== undefined) {
+                const cleanNewEmail = updates.email.trim().toLowerCase();
+                const currentCleanEmail = (currentUserProfile.email || '').trim().toLowerCase();
+                
+                const isMockNewEmail = cleanNewEmail.endsWith('@juijui.local') || cleanNewEmail.endsWith('@juijui-app.com');
+                const isMockCurrentEmail = currentCleanEmail.endsWith('@juijui.local') || currentCleanEmail.endsWith('@juijui-app.com') || !currentCleanEmail;
+
+                if (cleanNewEmail && cleanNewEmail !== currentCleanEmail && !isMockNewEmail) {
+                    if (isMockCurrentEmail) {
+                        // Use our backend admin-bypass route because changing from a mock local email domain
+                        // triggers GoTrue/SMTP "Secure email change" verification errors for the non-existent domain.
+                        const sessionData = await supabase.auth.getSession();
+                        const token = sessionData.data.session?.access_token;
+                        if (!token) throw new Error('ไม่พบข้อมูลเซสชันการเข้าสู่ระบบ กรุณาลองใหม่อีกครั้ง');
+
+                        const res = await fetch('/api/auth/update-email', {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'Authorization': `Bearer ${token}`
+                            },
+                            body: JSON.stringify({ email: cleanNewEmail })
+                        });
+
+                        if (!res.ok) {
+                            const errData = await res.json().catch(() => ({}));
+                            throw new Error(errData.error || 'ไม่สามารถอัปเดตอีเมลผ่านระบบหลังบ้านได้');
+                        }
+                    } else {
+                        // Regular flow for normal email addresses
+                        const { error: authError } = await supabase.auth.updateUser({ email: cleanNewEmail });
+                        if (authError) throw authError;
+                    }
+                    payload.email = cleanNewEmail;
+                }
+            }
+
             if (avatarFile) {
                 const fileExt = avatarFile.name.split('.').pop();
                 const fileName = `${currentUserProfile.id}-${Date.now()}.${fileExt}`;
@@ -424,7 +474,7 @@ export const UserSessionProvider: React.FC<{ sessionUser: any, children: React.R
             if (error) throw error;
             
             // Optimistic update
-            setCurrentUserProfile(prev => prev ? ({ ...prev, ...updates, avatarUrl: payload.avatar_url || prev.avatarUrl }) : null);
+            setCurrentUserProfile(prev => prev ? ({ ...prev, ...updates, email: payload.email || prev.email, avatarUrl: payload.avatar_url || prev.avatarUrl }) : null);
             return true;
         } catch (err: any) {
             console.error('Update profile failed:', err);
@@ -464,7 +514,7 @@ export const UserSessionProvider: React.FC<{ sessionUser: any, children: React.R
 
             const { data, error } = await query;
             if (error) throw error;
-            if (data) setLeaveRequests(data.map(mapLeaveRequest));
+            if (data) setLeaveRequests(data.filter((r: any) => r.type !== 'OVERTIME').map(mapLeaveRequest));
         } catch (error) {
             console.error("Error refreshing leaves:", error);
         }
@@ -538,6 +588,7 @@ export const UserSessionProvider: React.FC<{ sessionUser: any, children: React.R
             if (updates.name) payload.full_name = updates.name;
             if (updates.position) payload.position = updates.position;
             if (updates.role) payload.role = updates.role;
+            if (updates.employmentType !== undefined) payload.employment_type = updates.employmentType;
             if (updates.workDays) payload.work_days = updates.workDays;
             if (updates.baseSalary !== undefined) payload.base_salary = updates.baseSalary;
             if (updates.bankAccount !== undefined) payload.bank_account = updates.bankAccount;

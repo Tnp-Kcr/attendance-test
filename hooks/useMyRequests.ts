@@ -1,12 +1,14 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import { supabase } from '../lib/supabase';
 import { LeaveRequest, LeaveType, LeaveUsage, RequestStatus } from '../types/attendance';
+import { ATTENDANCE_REGISTRY } from '../constants/attendanceRegistry';
 import { useToast } from '../context/ToastContext';
+import { useGlobalDialog } from '../context/GlobalDialogContext';
 import { eachDayOfInterval, format, isValid } from 'date-fns';
 import { useGoogleDrive } from './useGoogleDrive';
 import { useUserSession } from '../context/UserSessionContext';
 import { useMasterData } from './useMasterData';
-import { isWorkingDay } from '../utils/judgeUtils';
+import { isWorkingDay, countWorkingDaysBetween } from '../utils/judgeUtils';
 import { calculateOtMultiplier, calculateEstimatedPayout } from '../utils/otCalculator';
 import { attendanceService } from '../services/attendanceService';
 
@@ -17,7 +19,9 @@ export const useMyRequests = (currentUser?: any, options: { enabled?: boolean } 
         otRequests: contextOtRequests, 
         allUsers, 
         isReady: isContextReady, 
-        refreshOTRequests 
+        refreshOTRequests,
+        refreshAttendance,
+        refreshLeaves
     } = useUserSession();
     
     const { annualHolidays, calendarExceptions } = useMasterData();
@@ -25,6 +29,7 @@ export const useMyRequests = (currentUser?: any, options: { enabled?: boolean } 
     const [isLoading, setIsLoading] = useState(enabled);
     const [isLoadingHistorical, setIsLoadingHistorical] = useState(false);
     const { showToast } = useToast();
+    const { showConfirm, showLoading, hideLoading } = useGlobalDialog();
     const { uploadFileToDrive, isReady: isDriveReady } = useGoogleDrive();
 
     const checkLateSubmissionRule = (
@@ -37,10 +42,21 @@ export const useMyRequests = (currentUser?: any, options: { enabled?: boolean } 
         if (!isValid(requestDate) || !isValid(submittedDate)) return false;
         const requestDay = new Date(requestDate.getFullYear(), requestDate.getMonth(), requestDate.getDate());
         const submittedDay = new Date(submittedDate.getFullYear(), submittedDate.getMonth(), submittedDate.getDate());
-        return requestDay < submittedDay;
+        
+        if (requestDay >= submittedDay) return false;
+
+        const workingDaysCount = countWorkingDaysBetween(
+            requestDay,
+            submittedDay,
+            annualHolidays || [],
+            calendarExceptions || [],
+            user
+        );
+
+        return workingDaysCount > 2;
     };
 
-    const fetchMyRequests = async () => {
+    const fetchMyRequests = useCallback(async () => {
         if (!enabled || !currentUser?.id) return;
         setIsLoading(true);
         try {
@@ -51,7 +67,7 @@ export const useMyRequests = (currentUser?: any, options: { enabled?: boolean } 
         } finally {
             setIsLoading(false);
         }
-    };
+    }, [enabled, currentUser?.id]);
 
     useEffect(() => {
         if (!enabled) {
@@ -66,7 +82,7 @@ export const useMyRequests = (currentUser?: any, options: { enabled?: boolean } 
         }
 
         // Merge and filter personal requests from context
-        const personalLeaves = contextLeaveRequests.filter(r => r.userId === currentUser.id);
+        const personalLeaves = contextLeaveRequests.filter(r => r.userId === currentUser.id && r.type !== 'OVERTIME');
         const personalOts: LeaveRequest[] = (contextOtRequests || [])
             .filter(r => r.userId === currentUser.id)
             .map(r => ({
@@ -111,14 +127,16 @@ export const useMyRequests = (currentUser?: any, options: { enabled?: boolean } 
     }, [rawRequests, allUsers, enabled]);
 
     const leaveUsage: LeaveUsage = useMemo(() => {
-        const usage: LeaveUsage = {
-            SICK: 0, VACATION: 0, PERSONAL: 0, EMERGENCY: 0,
-            LATE_ENTRY: 0, OVERTIME: 0, FORGOT_CHECKIN: 0, FORGOT_CHECKOUT: 0, FORGOT_BOTH: 0, WFH: 0, UNPAID: 0
-        };
+        const usage = {} as LeaveUsage;
+        Object.keys(ATTENDANCE_REGISTRY).forEach(k => {
+            usage[k as LeaveType] = 0;
+        });
 
         if (!enabled || !currentUser?.id) return usage;
 
-        const LEAVE_TYPES = ['SICK', 'VACATION', 'PERSONAL', 'EMERGENCY', 'UNPAID'];
+        const LEAVE_TYPES = Object.values(ATTENDANCE_REGISTRY)
+            .filter(item => item.category === 'LEAVE')
+            .map(item => item.id);
 
         requests.forEach(req => {
             if (req.userId === currentUser.id && req.status === 'APPROVED') {
@@ -143,14 +161,16 @@ export const useMyRequests = (currentUser?: any, options: { enabled?: boolean } 
     }, [requests, currentUser?.id, annualHolidays, calendarExceptions, enabled]);
 
     const pendingUsage: LeaveUsage = useMemo(() => {
-        const usage: LeaveUsage = {
-            SICK: 0, VACATION: 0, PERSONAL: 0, EMERGENCY: 0,
-            LATE_ENTRY: 0, OVERTIME: 0, FORGOT_CHECKIN: 0, FORGOT_CHECKOUT: 0, FORGOT_BOTH: 0, WFH: 0, UNPAID: 0
-        };
+        const usage = {} as LeaveUsage;
+        Object.keys(ATTENDANCE_REGISTRY).forEach(k => {
+            usage[k as LeaveType] = 0;
+        });
 
         if (!enabled || !currentUser?.id) return usage;
 
-        const LEAVE_TYPES = ['SICK', 'VACATION', 'PERSONAL', 'EMERGENCY', 'UNPAID'];
+        const LEAVE_TYPES = Object.values(ATTENDANCE_REGISTRY)
+            .filter(item => item.category === 'LEAVE')
+            .map(item => item.id);
 
         requests.forEach(req => {
             if (req.userId === currentUser.id && req.status === 'PENDING') {
@@ -179,14 +199,31 @@ export const useMyRequests = (currentUser?: any, options: { enabled?: boolean } 
         startDate: Date, 
         endDate: Date, 
         reason: string, 
-        file?: File
+        file?: File,
+        linkedRemoteType?: 'WFH' | 'ONSITE'
     ): Promise<boolean> => {
         if (!currentUser?.id) return false;
+        showLoading('กำลังอัปโหลดไฟล์และส่งคำขอเข้าระบบ...');
         try {
             const startDateStr = format(startDate, 'yyyy-MM-dd');
+            const timestamp = Date.now();
+            const linkId = linkedRemoteType ? `LINK_FORGOT_${currentUser.id}_${startDateStr}_${timestamp}` : null;
+            let finalReasonWithLink = linkId ? `[LINKID:${linkId}] ${reason}` : reason;
+
+            if (linkedRemoteType && !finalReasonWithLink.includes('[REMOTE:')) {
+                finalReasonWithLink = `[REMOTE:${linkedRemoteType}] ${finalReasonWithLink}`;
+            }
+
+            if (type === 'FORGOT_CHECKOUT' || type === 'OUT_OF_RANGE_CHECKOUT') {
+                if (!finalReasonWithLink.includes('[PROVISIONAL_CHECKOUT]')) {
+                    finalReasonWithLink = `[PROVISIONAL_CHECKOUT] ${finalReasonWithLink}`;
+                }
+            }
 
             // --- OT Request Handling ---
             if (type === 'OVERTIME') {
+                const isFixedOt = reason.includes('[OT:FIXED]');
+
                 // Try matching new format: [OT:18:30-20:30] (2hr) Reason
                 const otTimeMatch = reason.match(/\[OT:(\d{2}:\d{2})-(\d{2}:\d{2})\]/);
                 const startTime = otTimeMatch ? otTimeMatch[1] : '18:30';
@@ -197,12 +234,16 @@ export const useMyRequests = (currentUser?: any, options: { enabled?: boolean } 
                 const otHours = otHoursMatch ? parseFloat(otHoursMatch[1]) : 2.0;
 
                 // Clean the reason prefix
-                const cleanReason = reason
+                let cleanReason = reason
                     .replace(/\[OT:\d{2}:\d{2}-\d{2}:\d{2}\]\s*\([\d\.]+hr\)\s*/, '')
                     .replace(/\[OT:[\d\.]+hr\]\s*/, '')
                     .trim();
 
-                const { data: existing } = await supabase
+                if (isFixedOt) {
+                    cleanReason = `[OT:FIXED] ${cleanReason.replace(/\[OT:FIXED\]/g, '').trim()}`;
+                }
+
+                const { data: existing = null } = await supabase
                     .from('ot_requests')
                     .select('id, status')
                     .eq('user_id', currentUser.id)
@@ -219,11 +260,48 @@ export const useMyRequests = (currentUser?: any, options: { enabled?: boolean } 
                     return false;
                 }
 
+                // Upload attachment specifically for OT if provided
+                let otAttachmentUrl: string | null = null;
+                if (file) {
+                    let driveSuccess = false;
+                    if (isDriveReady) {
+                        try {
+                            showToast('กำลังอัปโหลดไปที่ Google Drive...', 'info');
+                            const currentYear = format(new Date(), 'yyyy');
+                            const currentMonth = format(new Date(), 'MM');
+                            const driveResult = await uploadFileToDrive(file, ['Juijui_Assets', 'Attendance', 'Leaves', currentYear, currentMonth, currentUser.name || 'Unknown']);
+                            otAttachmentUrl = driveResult.thumbnailUrl || driveResult.url;
+                            driveSuccess = true;
+                        } catch (driveErr: any) {
+                            console.warn("Drive upload failed, falling back to Supabase", driveErr);
+                        }
+                    }
+
+                    if (!driveSuccess) {
+                        try {
+                            showToast('กำลังอัปโหลดไปที่ Storage สำรอง...', 'info');
+                            const fileExt = file.name.split('.').pop();
+                            const fileName = `${currentUser.id}_${Date.now()}.${fileExt}`;
+                            const { error: uploadErr } = await supabase.storage
+                                .from('chat-files')
+                                .upload(`proofs/${fileName}`, file);
+
+                            if (uploadErr) throw uploadErr;
+
+                            const { data } = supabase.storage.from('chat-files').getPublicUrl(`proofs/${fileName}`);
+                            otAttachmentUrl = data.publicUrl;
+                        } catch (supabaseErr: any) {
+                            console.error("Supabase upload failed", supabaseErr);
+                            throw new Error("ไม่สามารถอัปโหลดไฟล์ได้ทั้ง Google Drive และ Supabase");
+                        }
+                    }
+                }
+
                 const baseSalary = currentUser.baseSalary || 0;
                 const { type: otType, multiplier } = calculateOtMultiplier(startDate, annualHolidays, calendarExceptions);
-                const estimatedPayout = calculateEstimatedPayout(baseSalary, otHours, multiplier);
+                const estimatedPayout = isFixedOt ? 0 : calculateEstimatedPayout(baseSalary, otHours, multiplier);
 
-                await attendanceService.insertOtRequest({
+                const insertedOt = await attendanceService.insertOtRequest({
                     user_id: currentUser.id,
                     date: startDateStr,
                     start_time: startTime,
@@ -233,10 +311,14 @@ export const useMyRequests = (currentUser?: any, options: { enabled?: boolean } 
                     type: otType,
                     status: 'PENDING',
                     base_salary_at_time: baseSalary,
-                    computed_payout: estimatedPayout
+                    computed_payout: estimatedPayout,
+                    attachment_url: otAttachmentUrl,
+                    is_fixed: isFixedOt
                 });
 
-                const msg = `📢 **${currentUser.name}** ส่งคำขอ OT (${otHours} ชม.) \n📅 ${format(startDate, 'd MMM')} \n📝: ${cleanReason}`;
+                const displayReason = isFixedOt ? cleanReason.replace(/\[OT:FIXED\]/g, '').trim() : cleanReason;
+                const otDisplayStr = isFixedOt ? 'เหมาจ่าย' : `${otHours} ชม.`;
+                const msg = `📢 **${currentUser.name}** ส่งคำขอ OT (${otDisplayStr}) \n📅 ${format(startDate, 'd MMM')} \n📝: ${displayReason}`;
                 await supabase.from('team_messages').insert({
                     content: msg,
                     is_bot: true,
@@ -244,7 +326,28 @@ export const useMyRequests = (currentUser?: any, options: { enabled?: boolean } 
                     user_id: null
                 });
 
+                try {
+                    const { data: admins } = await supabase.from('profiles').select('id').eq('role', 'ADMIN');
+                    if (admins && admins.length > 0) {
+                        const otNotifs = admins.map(admin => ({
+                            user_id: admin.id,
+                            type: 'APPROVAL_REQ',
+                            title: '⏰ คำขอ OT ใหม่',
+                            message: `คุณ ${currentUser.name || 'พนักงาน'} ส่งคำขอ OT (${otDisplayStr}) วันที่ ${format(startDate, 'd MMM')}: "${displayReason}"`,
+                            is_read: false,
+                            link_path: 'ATTENDANCE',
+                            related_id: insertedOt?.id || null,
+                            metadata: { request_type: 'OT' }
+                        }));
+                        await supabase.from('notifications').insert(otNotifs);
+                    }
+                } catch (notiErr) {
+                    console.error("Failed to insert admin OT notifications:", notiErr);
+                }
+
                 showToast('ส่งคำขอ OT เรียบร้อย รออนุมัติครับ 📨', 'success');
+                if (refreshLeaves) await refreshLeaves();
+                if (refreshAttendance) await refreshAttendance();
                 if (refreshOTRequests) {
                     await refreshOTRequests();
                 }
@@ -253,29 +356,75 @@ export const useMyRequests = (currentUser?: any, options: { enabled?: boolean } 
             }
 
             // --- Late Submission Rule check ---
-            const CORRECTION_TYPES = ['LATE_ENTRY', 'FORGOT_CHECKIN', 'FORGOT_CHECKOUT', 'FORGOT_BOTH'];
+            const CORRECTION_TYPES = ['LATE_ENTRY', 'FORGOT_CHECKIN', 'FORGOT_CHECKOUT', 'FORGOT_BOTH', 'OUT_OF_RANGE_CHECKOUT'];
             let isLateSubmission = false;
             if (CORRECTION_TYPES.includes(type)) {
                 isLateSubmission = checkLateSubmissionRule(startDate, new Date(), annualHolidays, calendarExceptions, currentUser);
             }
 
             // Check duplicate leave request
-            const { data: existingRequest } = await supabase
-                .from('leave_requests')
-                .select('id, status')
-                .eq('user_id', currentUser.id)
-                .eq('type', type)
-                .eq('start_date', startDateStr)
-                .in('status', ['PENDING', 'APPROVED']) 
-                .maybeSingle();
+            const LEAVE_TYPES = Object.values(ATTENDANCE_REGISTRY)
+                .filter(item => item.category === 'LEAVE')
+                .map(item => item.id);
 
-            if (existingRequest) {
-                if (existingRequest.status === 'PENDING') {
-                    showToast('คำขอนี้ส่งไปแล้ว รออนุมัติครับ ⏳', 'warning');
-                } else {
-                    showToast('คำขอนี้อนุมัติแล้วครับ ✅', 'info');
+            const isNewLeave = LEAVE_TYPES.includes(type);
+
+            if (isNewLeave) {
+                const { data: existingLeaves } = await supabase
+                    .from('leave_requests')
+                    .select('id, type, status')
+                    .eq('user_id', currentUser.id)
+                    .in('type', LEAVE_TYPES)
+                    .eq('start_date', startDateStr)
+                    .in('status', ['PENDING', 'APPROVED']);
+
+                if (existingLeaves && existingLeaves.length > 0) {
+                    const approvedLeave = existingLeaves.find(l => l.status === 'APPROVED');
+                    if (approvedLeave) {
+                        showToast('คุณมีวันลาที่ได้รับการอนุมัติแล้วในวันนี้ครับ ✅', 'warning');
+                        return false;
+                    }
+
+                    const pendingLeave = existingLeaves.find(l => l.status === 'PENDING');
+                    if (pendingLeave) {
+                        const originalTypeName = ATTENDANCE_REGISTRY[pendingLeave.type as LeaveType]?.label || pendingLeave.type;
+                        const newTypeName = ATTENDANCE_REGISTRY[type]?.label || type;
+                        const confirmReplace = await showConfirm(
+                            `ในระบบมีคำขอลา [${originalTypeName}] ที่อยู่ระหว่างรออนุมัติอยู่แล้วในวันนี้\nคุณต้องการ ยกเลิกคำขอเดิม แล้วยื่นคำขอ [${newTypeName}] นี้เข้าไปแทนที่หรือไม่?`,
+                            'ตรวจพบคำขอลาซ้ำซ้อน'
+                        );
+
+                        if (confirmReplace) {
+                            await supabase
+                                .from('leave_requests')
+                                .update({ 
+                                    status: 'REJECTED',
+                                    reason: `[REJECTED_FOR_REPLACEMENT] ${newTypeName}`
+                                })
+                                .eq('id', pendingLeave.id);
+                        } else {
+                            return false;
+                        }
+                    }
                 }
-                return false; 
+            } else {
+                const { data: existingRequest } = await supabase
+                    .from('leave_requests')
+                    .select('id, status')
+                    .eq('user_id', currentUser.id)
+                    .eq('type', type)
+                    .eq('start_date', startDateStr)
+                    .in('status', ['PENDING', 'APPROVED']) 
+                    .maybeSingle();
+
+                if (existingRequest) {
+                    if (existingRequest.status === 'PENDING') {
+                        showToast('คำขอนี้ส่งไปแล้ว รออนุมัติครับ ⏳', 'warning');
+                    } else {
+                        showToast('คำขอนี้อนุมัติแล้วครับ ✅', 'info');
+                    }
+                    return false; 
+                }
             }
 
             let attachmentUrl: string | null = null;
@@ -314,21 +463,206 @@ export const useMyRequests = (currentUser?: any, options: { enabled?: boolean } 
                 }
             }
 
-            await attendanceService.insertLeaveRequest({
+            // Insert primary request (e.g. FORGOT_CHECKIN)
+            const insertedLeaveReq = await attendanceService.insertLeaveRequest({
                 user_id: currentUser.id,
                 type,
                 start_date: startDateStr,
                 end_date: format(endDate, 'yyyy-MM-dd'),
-                reason: isLateSubmission ? `[LATE_SUBMISSION] ${reason}` : reason,
+                reason: isLateSubmission ? `[LATE_SUBMISSION] ${finalReasonWithLink}` : finalReasonWithLink,
                 attachment_url: attachmentUrl,
                 status: 'PENDING'
             });
 
-            if (type === 'FORGOT_CHECKOUT') {
-                await supabase.from('attendance_logs').update({ status: 'PENDING_VERIFY' }).eq('user_id', currentUser.id).eq('date', startDateStr);
+            // Insert secondary request (e.g. WFH or ONSITE) linked with same LINKID if not already exists
+            if (linkedRemoteType && linkId) {
+                const { data: existingRemote } = await supabase
+                    .from('leave_requests')
+                    .select('id')
+                    .eq('user_id', currentUser.id)
+                    .eq('type', linkedRemoteType)
+                    .eq('start_date', startDateStr)
+                    .in('status', ['PENDING', 'APPROVED'])
+                    .maybeSingle();
+
+                if (!existingRemote) {
+                    const dualReason = `[LINKID:${linkId}] ขออนุมัติปฏิบัติงานรีโมทโดยไม่ได้ขออนุญาตล่วงหน้า (เนื่องจากอยู่นอกพิกัดหลัก)`;
+                    await attendanceService.insertLeaveRequest({
+                        user_id: currentUser.id,
+                        type: linkedRemoteType,
+                        start_date: startDateStr,
+                        end_date: startDateStr,
+                        reason: dualReason,
+                        attachment_url: null,
+                        status: 'PENDING'
+                    });
+                }
             }
 
-            const msg = `📢 **${currentUser.name}** ส่งคำขอ (${type}) \n📅 ${format(startDate, 'd MMM')} \n📝: ${reason}`;
+            if (type === 'FORGOT_CHECKIN') {
+                const { data: existingLog } = await supabase
+                    .from('attendance_logs')
+                    .select('*')
+                    .eq('user_id', currentUser.id)
+                    .eq('date', startDateStr)
+                    .maybeSingle();
+
+                let finalNote = '[PROVISIONAL_FORGOT_CHECKIN]';
+                if (linkedRemoteType) {
+                    finalNote = `[PROVISIONAL_FORGOT_CHECKIN] [PROVISIONAL_${linkedRemoteType}]`;
+                }
+                if (existingLog?.note) {
+                    if (!existingLog.note.includes('[PROVISIONAL_FORGOT_CHECKIN]')) {
+                        finalNote = `${existingLog.note} ${finalNote}`.trim();
+                    } else {
+                        finalNote = existingLog.note;
+                    }
+                }
+
+                const payload: any = {
+                    user_id: currentUser.id,
+                    date: startDateStr,
+                    check_in_time: startDate.toISOString(),
+                    status: 'WORKING',
+                    note: finalNote,
+                    work_type: linkedRemoteType || existingLog?.work_type || 'OFFICE'
+                };
+
+                await supabase.from('attendance_logs').upsert(payload, { onConflict: 'user_id, date' });
+                
+                if (startDateStr === format(new Date(), 'yyyy-MM-dd')) {
+                    await supabase.from('profiles').update({ work_status: 'ONLINE' }).eq('id', currentUser.id);
+                }
+            }
+
+            if (type === 'FORGOT_BOTH') {
+                const { data: existingLog } = await supabase
+                    .from('attendance_logs')
+                    .select('*')
+                    .eq('user_id', currentUser.id)
+                    .eq('date', startDateStr)
+                    .maybeSingle();
+
+                let finalNote = '[FORGOT_BOTH_PENDING]';
+                if (linkedRemoteType) {
+                    finalNote = `[FORGOT_BOTH_PENDING] [PROVISIONAL_${linkedRemoteType}]`;
+                }
+
+                const wasAbsent = existingLog?.status === 'ABSENT' || existingLog?.note?.includes('[ORIGINALLY: ABSENT]');
+
+                if (existingLog?.note) {
+                    if (!existingLog.note.includes('[FORGOT_BOTH_PENDING]')) {
+                        finalNote = `${existingLog.note} ${finalNote}`.trim();
+                    } else {
+                        finalNote = existingLog.note;
+                    }
+                }
+
+                if (wasAbsent && !finalNote.includes('[ORIGINALLY: ABSENT]')) {
+                    finalNote = `[ORIGINALLY: ABSENT] ${finalNote}`;
+                }
+                
+                const payload: any = {
+                    user_id: currentUser.id,
+                    date: startDateStr,
+                    check_in_time: startDate.toISOString(), // บันทึกเวลาเข้าจำลองชั่วคราว
+                    check_out_time: endDate.toISOString(), // บันทึกเวลาออกจำลองชั่วคราวตามที่ส่งขอ
+                    status: 'PENDING_VERIFY', // ตั้งเป็น PENDING_VERIFY เพื่อรออนุมัติ
+                    note: finalNote,
+                    work_type: linkedRemoteType || existingLog?.work_type || 'OFFICE'
+                };
+
+                await supabase.from('attendance_logs').upsert(payload, { onConflict: 'user_id, date' });
+
+                if (startDateStr === format(new Date(), 'yyyy-MM-dd')) {
+                    await supabase.from('profiles').update({ work_status: 'ONLINE' }).eq('id', currentUser.id);
+                }
+            }
+
+            if (type === 'LATE_ENTRY') {
+                const { data: existingLog } = await supabase
+                    .from('attendance_logs')
+                    .select('*')
+                    .eq('user_id', currentUser.id)
+                    .eq('date', startDateStr)
+                    .maybeSingle();
+
+                let finalNote = '[PROVISIONAL_LATE_ENTRY]';
+                if (linkedRemoteType) {
+                    finalNote = `[PROVISIONAL_LATE_ENTRY] [PROVISIONAL_${linkedRemoteType}]`;
+                }
+                if (existingLog?.note) {
+                    if (!existingLog.note.includes('[PROVISIONAL_LATE_ENTRY]')) {
+                        finalNote = `${existingLog.note} ${finalNote}`.trim();
+                    } else {
+                        finalNote = existingLog.note;
+                    }
+                }
+
+                const payload: any = {
+                    user_id: currentUser.id,
+                    date: startDateStr,
+                    check_in_time: startDate.toISOString(),
+                    status: 'WORKING',
+                    note: finalNote,
+                    work_type: linkedRemoteType || existingLog?.work_type || 'OFFICE'
+                };
+
+                await supabase.from('attendance_logs').upsert(payload, { onConflict: 'user_id, date' });
+                
+                if (startDateStr === format(new Date(), 'yyyy-MM-dd')) {
+                    await supabase.from('profiles').update({ work_status: 'ONLINE' }).eq('id', currentUser.id);
+                }
+            }
+
+            if (type === 'FORGOT_CHECKOUT' || type === 'OUT_OF_RANGE_CHECKOUT') {
+                const { data: existingLog } = await supabase
+                    .from('attendance_logs')
+                    .select('*')
+                    .eq('user_id', currentUser.id)
+                    .eq('date', startDateStr)
+                    .maybeSingle();
+
+                let finalNote = '[PROVISIONAL_CHECKOUT]';
+                if (existingLog?.note) {
+                    if (!existingLog.note.includes('[PROVISIONAL_CHECKOUT]')) {
+                        finalNote = `${existingLog.note} ${finalNote}`.trim();
+                    } else {
+                        finalNote = existingLog.note;
+                    }
+                }
+
+                const payload: any = {
+                    status: 'PENDING_VERIFY',
+                    note: finalNote,
+                    check_out_time: endDate.toISOString()
+                };
+
+                await supabase
+                    .from('attendance_logs')
+                    .update(payload)
+                    .eq('user_id', currentUser.id)
+                    .eq('date', startDateStr);
+            }
+
+            if (type === 'WFH' || type === 'ONSITE') {
+                const { data: existingLog } = await supabase
+                    .from('attendance_logs')
+                    .select('*')
+                    .eq('user_id', currentUser.id)
+                    .eq('date', startDateStr)
+                    .maybeSingle();
+
+                if (existingLog) {
+                    await supabase
+                        .from('attendance_logs')
+                        .update({ status: 'PENDING_VERIFY' })
+                        .eq('id', existingLog.id);
+                }
+            }
+
+            const displayType = linkedRemoteType ? `${type} + ${linkedRemoteType}` : type;
+            const msg = `📢 **${currentUser.name}** ส่งคำขอ (${displayType}) \n📅 ${format(startDate, 'd MMM')} \n📝: ${reason}`;
             await supabase.from('team_messages').insert({
                 content: msg,
                 is_bot: true,
@@ -336,16 +670,44 @@ export const useMyRequests = (currentUser?: any, options: { enabled?: boolean } 
                 user_id: null
             });
 
+            try {
+                const { data: admins } = await supabase.from('profiles').select('id').eq('role', 'ADMIN');
+                if (admins && admins.length > 0) {
+                    const labelPrimary = ATTENDANCE_REGISTRY[type]?.label || type;
+                    const labelSecondary = linkedRemoteType ? ` + ${ATTENDANCE_REGISTRY[linkedRemoteType]?.label || linkedRemoteType}` : '';
+                    const labelCombine = `${labelPrimary}${labelSecondary}`;
+
+                    const generalNotifs = admins.map(admin => ({
+                        user_id: admin.id,
+                        type: 'APPROVAL_REQ',
+                        title: `📋 คำขออนุมัติ [${labelCombine}]`,
+                        message: `คุณ ${currentUser.name || 'พนักงาน'} ส่งคำขอ [${labelCombine}] วันที่ ${format(startDate, 'd MMM')}: "${reason}"`,
+                        is_read: false,
+                        link_path: 'ATTENDANCE',
+                        related_id: insertedLeaveReq?.id || null,
+                        metadata: { request_type: type }
+                    }));
+                    await supabase.from('notifications').insert(generalNotifs);
+                }
+            } catch (notiErr) {
+                console.error("Failed to insert admin general notifications:", notiErr);
+            }
+
             showToast('ส่งคำขอเรียบร้อย รออนุมัติครับ 📨', 'success');
+            if (refreshLeaves) await refreshLeaves();
+            if (refreshAttendance) await refreshAttendance();
+            if (refreshOTRequests) await refreshOTRequests();
             fetchMyRequests();
             return true;
         } catch (err: any) {
             showToast('ส่งคำขอไม่สำเร็จ: ' + err.message, 'error');
             return false;
+        } finally {
+            hideLoading();
         }
     };
 
-    const fetchRequestsForRange = async (start?: Date, end?: Date): Promise<LeaveRequest[]> => {
+    const fetchRequestsForRange = useCallback(async (start?: Date, end?: Date): Promise<LeaveRequest[]> => {
         if (!currentUser?.id) return [];
         setIsLoadingHistorical(true);
         try {
@@ -361,7 +723,7 @@ export const useMyRequests = (currentUser?: any, options: { enabled?: boolean } 
         } finally {
             setIsLoadingHistorical(false);
         }
-    };
+    }, [currentUser?.id]);
 
     return {
         requests,

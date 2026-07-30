@@ -17,33 +17,74 @@ import TimesheetTable from './TimesheetTable';
 import TimesheetDetailModal from './TimesheetDetailModal';
 import ExportSettingsModal from './ExportSettingsModal';
 import { useMasterDataContext } from '../../../context/MasterDataContext';
-import { AnimatePresence } from 'framer-motion';
+import { AnimatePresence, motion } from 'framer-motion';
+import { Check, X } from 'lucide-react';
 
 // --- Main Dashboard ---
 const AdminWeeklyTimesheet: React.FC<{ users: User[] }> = ({ users }) => {
     const { masterOptions } = useMasterDataContext();
     
+    // Toast state
+    const [exportToast, setExportToast] = useState<{ filename: string; id: string } | null>(null);
+
+    // Auto-dismiss Toast
+    useEffect(() => {
+        if (exportToast) {
+            const timer = setTimeout(() => {
+                setExportToast(null);
+            }, 5000);
+            return () => clearTimeout(timer);
+        }
+    }, [exportToast]);
+
     // View States
     const [viewMode, setViewMode] = useState<'WEEK' | 'MONTH'>('WEEK');
     const [showExportSettings, setShowExportSettings] = useState(false);
+    const [isToolsExpanded, setIsToolsExpanded] = useState(false);
 
     const workConfig = useMemo(() => {
         const startTime = masterOptions.find(o => o.type === 'WORK_CONFIG' && o.key === 'START_TIME')?.label || '10:00';
         const buffer = parseInt(masterOptions.find(o => o.type === 'WORK_CONFIG' && o.key === 'LATE_BUFFER')?.label || '15');
-        return { startTime, buffer };
+        const shiftsEnabled = masterOptions.find(o => o.type === 'WORK_CONFIG' && o.key === 'MULTIPLE_SHIFTS_ENABLED')?.label === 'true';
+        const shiftsList = masterOptions.find(o => o.type === 'WORK_CONFIG' && o.key === 'MULTIPLE_SHIFTS_LIST')?.label || '';
+        return {
+            startTime,
+            buffer,
+            multipleShifts: {
+                enabled: shiftsEnabled,
+                shiftsList
+            }
+        };
     }, [masterOptions]);
     const [currentDate, setCurrentDate] = useState(new Date());
     const [searchTerm, setSearchTerm] = useState('');
     const [filterDepartment, setFilterDepartment] = useState('ALL');
     const [filterStatus, setFilterStatus] = useState<'ALL' | 'LATE' | 'ABSENT'>('ALL');
     const [showInactive, setShowInactive] = useState(false);
+    const [filterProvisionalOnly, setFilterProvisionalOnly] = useState(false);
     
     // Data States
     const [logs, setLogs] = useState<AttendanceLog[]>([]);
+
+    // Compute Provisional Count
+    const provisionalCount = useMemo(() => {
+        return logs.filter(l => 
+            l.note?.includes('[PROVISIONAL_FORGOT_CHECKIN]') || 
+            l.note?.includes('[PROVISIONAL_LATE_ENTRY]') || 
+            l.note?.includes('[PROVISIONAL_WFH]') || 
+            l.note?.includes('[PROVISIONAL_ONSITE]') ||
+            l.note?.includes('[PROVISIONAL_CHECKOUT]') ||
+            l.note?.includes('[PROVISIONAL_GPS_SPOOF_APPEAL]') ||
+            l.note?.includes('[GPS_SPOOF_APPEAL_PENDING]') ||
+            l.note?.includes('[APPEAL_PENDING]')
+        ).length;
+    }, [logs]);
     const [leaveRequests, setLeaveRequests] = useState<any[]>([]);
+    const [otRequests, setOtRequests] = useState<any[]>([]);
     const [isLoading, setIsLoading] = useState(true);
     const [selectedLog, setSelectedLog] = useState<AttendanceLog | null>(null);
     const [selectedLeaveRequest, setSelectedLeaveRequest] = useState<any | null>(null);
+    const [selectedOtRequest, setSelectedOtRequest] = useState<any | null>(null);
 
     // Smart Calendar Data
     const { annualHolidays } = useAnnualHolidays();
@@ -112,6 +153,16 @@ const AdminWeeklyTimesheet: React.FC<{ users: User[] }> = ({ users }) => {
                 if (leaveError) throw leaveError;
                 setLeaveRequests(leaveData || []);
 
+                // 3. Fetch OT Requests
+                const { data: otData, error: otError } = await supabase
+                    .from('ot_requests')
+                    .select('*')
+                    .gte('date', startStr)
+                    .lte('date', endStr);
+                
+                if (otError) throw otError;
+                setOtRequests(otData || []);
+
             } catch (err) {
                 console.error("Fetch data failed", err);
             } finally {
@@ -139,9 +190,19 @@ const AdminWeeklyTimesheet: React.FC<{ users: User[] }> = ({ users }) => {
             }, () => fetchData())
             .subscribe();
 
+        const otChannel = supabase.channel('admin-timesheet-ot')
+            .on('postgres_changes', { 
+                event: '*', 
+                schema: 'public', 
+                table: 'ot_requests',
+                filter: `date=gte.${startStr}&date=lte.${endStr}`
+            }, () => fetchData())
+            .subscribe();
+
         return () => {
             supabase.removeChannel(logsChannel);
             supabase.removeChannel(leavesChannel);
+            supabase.removeChannel(otChannel);
         };
     }, [dateRange]);
 
@@ -158,6 +219,21 @@ const AdminWeeklyTimesheet: React.FC<{ users: User[] }> = ({ users }) => {
             const matchesActive = showInactive || u.isActive;
             
             if (!matchesActive) return false;
+
+            if (filterProvisionalOnly) {
+                const userLogs = logs.filter(l => l.userId === u.id);
+                const hasProv = userLogs.some(l => 
+                    l.note?.includes('[PROVISIONAL_FORGOT_CHECKIN]') || 
+                    l.note?.includes('[PROVISIONAL_LATE_ENTRY]') || 
+                    l.note?.includes('[PROVISIONAL_WFH]') || 
+                    l.note?.includes('[PROVISIONAL_ONSITE]') ||
+                    l.note?.includes('[PROVISIONAL_CHECKOUT]') ||
+                    l.note?.includes('[PROVISIONAL_GPS_SPOOF_APPEAL]') ||
+                    l.note?.includes('[GPS_SPOOF_APPEAL_PENDING]') ||
+                    l.note?.includes('[APPEAL_PENDING]')
+                );
+                if (!hasProv) return false;
+            }
             
             if (filterStatus === 'ALL') return matchesSearch && matchesDept;
             
@@ -177,7 +253,7 @@ const AdminWeeklyTimesheet: React.FC<{ users: User[] }> = ({ users }) => {
             groups[dept].push(u);
         });
         return groups;
-    }, [users, searchTerm, filterDepartment, filterStatus,showInactive, logs]);
+    }, [users, searchTerm, filterDepartment, filterStatus, showInactive, logs, filterProvisionalOnly]);
 
     const nav = (offset: number) => {
         setCurrentDate(prev => viewMode === 'WEEK' ? addWeeks(prev, offset) : addMonths(prev, offset));
@@ -203,6 +279,11 @@ const AdminWeeklyTimesheet: React.FC<{ users: User[] }> = ({ users }) => {
                 showInactive={showInactive}
                 setShowInactive={setShowInactive}
                 onExportCSV={handleExportCSV}
+                isToolsExpanded={isToolsExpanded}
+                setIsToolsExpanded={setIsToolsExpanded}
+                provisionalCount={provisionalCount}
+                filterProvisionalOnly={filterProvisionalOnly}
+                setFilterProvisionalOnly={setFilterProvisionalOnly}
             />
 
             <TimesheetTable 
@@ -211,36 +292,65 @@ const AdminWeeklyTimesheet: React.FC<{ users: User[] }> = ({ users }) => {
                 filteredAndGroupedUsers={filteredAndGroupedUsers}
                 logs={logs}
                 leaveRequests={leaveRequests}
+                otRequests={otRequests}
                 getEffectiveDayStatus={getEffectiveDayStatus}
                 workConfig={workConfig}
-                onCellClick={(log, leaveReq) => {
+                onCellClick={(log, leaveReq, otReq) => {
                     setSelectedLog(log);
                     setSelectedLeaveRequest(leaveReq);
+                    setSelectedOtRequest(otReq);
                 }}
             />
 
             <AnimatePresence>
-                {(selectedLog || selectedLeaveRequest) && (
+                {(selectedLog || selectedLeaveRequest || selectedOtRequest) && (
                     <TimesheetDetailModal 
                         log={selectedLog}
                         leaveRequest={selectedLeaveRequest}
+                        otRequest={selectedOtRequest}
                         onClose={() => {
                             setSelectedLog(null);
                             setSelectedLeaveRequest(null);
+                            setSelectedOtRequest(null);
                         }}
                     />
                 )}
-                {showExportSettings && (
-                    <ExportSettingsModal 
-                        onClose={() => setShowExportSettings(false)}
-                        dateRange={dateRange}
-                        filteredAndGroupedUsers={filteredAndGroupedUsers}
-                        logs={logs}
-                        leaveRequests={leaveRequests}
-                        getEffectiveDayStatus={getEffectiveDayStatus}
-                        workConfig={workConfig}
-                        viewMode={viewMode}
-                    />
+                <ExportSettingsModal 
+                    isOpen={showExportSettings}
+                    onClose={() => setShowExportSettings(false)}
+                    dateRange={dateRange}
+                    filteredAndGroupedUsers={filteredAndGroupedUsers}
+                    logs={logs}
+                    leaveRequests={leaveRequests}
+                    getEffectiveDayStatus={getEffectiveDayStatus}
+                    workConfig={workConfig}
+                    viewMode={viewMode}
+                    onExportSuccess={(filename) => setExportToast({ filename, id: Date.now().toString() })}
+                />
+                {exportToast && (
+                    <motion.div
+                        initial={{ opacity: 0, y: -20, scale: 0.95 }}
+                        animate={{ opacity: 1, y: 0, scale: 1 }}
+                        exit={{ opacity: 0, y: -20, scale: 0.95 }}
+                        transition={{ type: "spring", stiffness: 350, damping: 25 }}
+                        className="fixed top-6 right-6 z-[250] bg-white/95 backdrop-blur-md border border-emerald-100 shadow-2xl rounded-2xl p-4 pr-12 max-w-sm w-full flex items-center gap-3.5"
+                    >
+                        <div className="w-10 h-10 bg-emerald-50 text-emerald-500 rounded-full flex items-center justify-center border border-emerald-100 shrink-0">
+                            <Check className="w-5 h-5 stroke-[2.5]" />
+                        </div>
+                        <div className="min-w-0 flex-1 text-left">
+                            <p className="text-xs font-bold text-slate-800">ดาวน์โหลดสำเร็จแล้ว! 📥</p>
+                            <p className="text-[10px] font-semibold text-slate-400 truncate mt-0.5" title={exportToast.filename}>
+                                {exportToast.filename}
+                            </p>
+                        </div>
+                        <button
+                            onClick={() => setExportToast(null)}
+                            className="absolute top-4 right-4 p-1 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-all cursor-pointer"
+                        >
+                            <X className="w-3.5 h-3.5" />
+                        </button>
+                    </motion.div>
                 )}
             </AnimatePresence>
         </div>

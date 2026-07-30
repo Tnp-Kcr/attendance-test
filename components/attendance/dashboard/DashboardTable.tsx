@@ -6,6 +6,7 @@ import { TableHeader } from "./table/components/TableHeader";
 import { TableGroupRow } from "./table/components/TableGroupRow";
 import { EmployeeRow } from "./table/components/EmployeeRow";
 import { UserStat, GroupMode, DashboardTableProps } from "./table/types";
+import { BRAND_CONFIG } from "../../../config/brand";
 
 const DashboardTable: React.FC<DashboardTableProps> = ({
   isLoading,
@@ -22,6 +23,9 @@ const DashboardTable: React.FC<DashboardTableProps> = ({
   onLateViewModeChange,
   otViewMode = "HOURS",
   onOtViewModeChange,
+  hpViewMode = "MONTHLY",
+  onHpViewModeChange,
+  snapshots = [],
 }) => {
   const [groupMode, setGroupMode] = useState<GroupMode>("POSITION");
   // Collapsible states: initially all expanded
@@ -54,6 +58,10 @@ const DashboardTable: React.FC<DashboardTableProps> = ({
     activeStatFilter,
     lateViewMode,
   });
+
+  const userMap = React.useMemo(() => {
+    return new Map(users.map((u) => [u.id, u]));
+  }, [users]);
 
   return (
     <div className="bg-white rounded-3xl border border-gray-200 shadow-sm overflow-hidden flex flex-col">
@@ -239,11 +247,17 @@ const DashboardTable: React.FC<DashboardTableProps> = ({
                     whileTap={{ scale: 0.95 }}
                     onClick={(e) => {
                       e.stopPropagation();
-                      onOtViewModeChange?.(otViewMode === "HOURS" ? "PAYOUT" : "HOURS");
+                      const modes: ("HOURS" | "LUMP_SUM" | "BOTH" | "PAYOUT")[] = ["HOURS", "LUMP_SUM", "BOTH", "PAYOUT"];
+                      const nextIndex = (modes.indexOf(otViewMode) + 1) % modes.length;
+                      onOtViewModeChange?.(modes[nextIndex]);
                     }}
-                    className={`inline-flex items-center h-6 px-2 py-0.5 text-[11px] font-semibold rounded-full border transition-colors duration-200 cursor-pointer ${
+                    className={`inline-flex items-center justify-center h-6 w-[88px] px-1.5 py-0.5 text-[10px] font-semibold rounded-full border transition-colors duration-200 cursor-pointer whitespace-nowrap ${
                       otViewMode === "HOURS"
                         ? "bg-purple-50 border-purple-200 text-purple-600 hover:bg-purple-100"
+                        : otViewMode === "LUMP_SUM"
+                        ? "bg-indigo-50 border-indigo-200 text-indigo-700 hover:bg-indigo-100"
+                        : otViewMode === "BOTH"
+                        ? "bg-sky-50 border-sky-200 text-sky-700 hover:bg-sky-100"
                         : "bg-emerald-50 border-emerald-200 text-emerald-700 hover:bg-emerald-100"
                     }`}
                   >
@@ -256,7 +270,15 @@ const DashboardTable: React.FC<DashboardTableProps> = ({
                         transition={{ duration: 0.12 }}
                         className="inline-flex items-center gap-1"
                       >
-                        <span>{otViewMode === "HOURS" ? "Hrs" : "Payout ฿"}</span>
+                        <span>
+                          {otViewMode === "HOURS"
+                            ? "⏱️ Hrs"
+                            : otViewMode === "LUMP_SUM"
+                            ? "💵 Lump"
+                            : otViewMode === "BOTH"
+                            ? "🌀 All"
+                            : "💰 Payout ฿"}
+                        </span>
                         <span className="text-[10px] opacity-70">⇄</span>
                       </motion.span>
                     </AnimatePresence>
@@ -264,20 +286,56 @@ const DashboardTable: React.FC<DashboardTableProps> = ({
                 </div>
               </th>
 
+              <th
+                className="px-4 py-4 font-bold text-center select-none cursor-pointer hover:bg-gray-100/50 active:scale-[0.98] transition-all rounded-t-lg"
+                onClick={() => {
+                  onHpViewModeChange?.(hpViewMode === 'MONTHLY' ? 'YEARLY' : 'MONTHLY');
+                }}
+              >
+                <div className="flex items-center justify-center gap-1.5 h-6">
+                  <span className="text-xs text-gray-500 uppercase font-bold whitespace-nowrap">
+                    HP
+                  </span>
+                  <div
+                    className={`inline-flex items-center justify-center h-5 w-[58px] text-[10px] font-semibold rounded-full border transition-colors duration-200 ${
+                      hpViewMode === 'MONTHLY'
+                        ? "bg-indigo-50 border-indigo-200 text-indigo-700"
+                        : "bg-emerald-50 border-emerald-200 text-emerald-700"
+                    }`}
+                  >
+                    <AnimatePresence mode="wait">
+                      <motion.span
+                        key={hpViewMode}
+                        initial={{ opacity: 0, y: -4 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0, y: 4 }}
+                        transition={{ duration: 0.12 }}
+                        className="inline-flex items-center gap-0.5"
+                      >
+                        <span>{hpViewMode === 'MONTHLY' ? 'Month' : 'Year'}</span>
+                        <span className="text-[9px] opacity-70">⇄</span>
+                      </motion.span>
+                    </AnimatePresence>
+                  </div>
+                </div>
+              </th>
+
               <th className="px-6 py-4 font-bold text-center">Total Hours</th>
-              <th className="px-6 py-4 font-bold text-center">Grade</th>
+              {BRAND_CONFIG.showGradeMode !== 2 && (
+                <th className="px-6 py-4 font-bold text-center">Grade</th>
+              )}
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
             {isLoading ? (
               <tr>
-                <td colSpan={8} className="py-20 text-center text-gray-400">
+                <td colSpan={BRAND_CONFIG.showGradeMode === 2 ? 8 : 9} className="py-20 text-center text-gray-400">
                   Loading Report...
                 </td>
               </tr>
             ) : filteredStats.length === 0 ? (
               <tr>
-                <td colSpan={8} className="py-20 text-center text-gray-400">
+                <td colSpan={BRAND_CONFIG.showGradeMode === 2 ? 8 : 9} className="py-20 text-center text-gray-400">
                   ไม่พบข้อมูลพนักงาน
                 </td>
               </tr>
@@ -303,7 +361,7 @@ const DashboardTable: React.FC<DashboardTableProps> = ({
                     {/* Highly performant list of single rows */}
                     {(groupMode === "NONE" || !isCollapsed) &&
                       groupStats.map((stat, idx) => {
-                        const user = users.find((u) => u.id === stat.userId);
+                        const user = userMap.get(stat.userId);
                         if (!user) return null;
 
                         return (
@@ -320,6 +378,8 @@ const DashboardTable: React.FC<DashboardTableProps> = ({
                             workingDaysCount={workingDaysCount}
                             lateViewMode={lateViewMode}
                             otViewMode={otViewMode}
+                            hpViewMode={hpViewMode}
+                            snapshots={snapshots}
                           />
                         );
                       })}

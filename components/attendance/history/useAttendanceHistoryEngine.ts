@@ -46,11 +46,11 @@ export const useAttendanceHistoryEngine = (userId: string, highlightedDate?: str
 
     const targetUser = useMemo(() => allUsers.find(u => u.id === userId), [allUsers, userId]);
 
+    const { annualHolidays: holidays, calendarExceptions: exceptions } = useMasterDataContext();
+
     // Data State
     const [historyLogs, setHistoryLogs] = useState<AttendanceLog[]>([]);
     const [totalCount, setTotalCount] = useState(0);
-    const [holidays, setHolidays] = useState<AnnualHoliday[]>([]);
-    const [exceptions, setExceptions] = useState<any[]>([]);
 
     const fetchData = useCallback(async () => {
         // 1. Generate all days in the filter range first to calculate dates interval
@@ -83,7 +83,7 @@ export const useAttendanceHistoryEngine = (userId: string, highlightedDate?: str
             date: Date;
             dateStr: string;
             existingLog?: AttendanceLog;
-            virtualStatus?: 'ABSENT' | 'LEAVE' | 'HOLIDAY' | 'NOT_STARTED';
+            virtualStatus?: 'ABSENT' | 'LEAVE' | 'HOLIDAY' | 'NOT_STARTED' | 'PENDING_VERIFY';
             virtualWorkType?: string;
         }
 
@@ -101,18 +101,32 @@ export const useAttendanceHistoryEngine = (userId: string, highlightedDate?: str
                 const leaveCheck = isUserOnLeave(dateStr, requests);
                 const isPast = !isFuture(date) && !isSameDay(date, new Date());
 
-                let status: 'ABSENT' | 'LEAVE' | 'HOLIDAY' | 'NOT_STARTED' = 'ABSENT';
+                let status: 'ABSENT' | 'LEAVE' | 'HOLIDAY' | 'NOT_STARTED' | 'PENDING_VERIFY' = 'ABSENT';
                 let workType = 'OFFICE';
                 
                 if (leaveCheck.onLeave) {
-                    status = 'LEAVE';
+                    status = leaveCheck.status === 'PENDING' ? 'PENDING_VERIFY' : 'LEAVE';
                     workType = 'LEAVE';
-                } else if (!isWorkDay) {
-                    status = 'HOLIDAY';
-                    workType = 'OFFICE'; // Default
-                } else if (!isPast) {
-                    status = 'NOT_STARTED'; // Skip future/unstarted
-                    workType = 'OFFICE';
+                } else {
+                    const activeWorkRequest = requests.find((req: any) => {
+                        if (req.userId !== userId || (req.status !== 'APPROVED' && req.status !== 'PENDING')) return false;
+                        if (req.type !== 'WFH' && req.type !== 'ONSITE') return false;
+                        const startStr = format(new Date(req.startDate), 'yyyy-MM-dd');
+                        const endStr = format(new Date(req.endDate), 'yyyy-MM-dd');
+                        return dateStr >= startStr && dateStr <= endStr;
+                    });
+
+                    if (activeWorkRequest) {
+                        workType = activeWorkRequest.type;
+                    }
+
+                    if (!isWorkDay) {
+                        status = 'HOLIDAY';
+                        workType = 'OFFICE'; // Default
+                    } else if (!isPast) {
+                        status = 'NOT_STARTED'; // Skip future/unstarted
+                        workType = 'OFFICE';
+                    }
                 }
 
                 // Filter out holidays/weekends/unstarted from the active log list to match previous logic
@@ -185,18 +199,7 @@ export const useAttendanceHistoryEngine = (userId: string, highlightedDate?: str
 
     }, [getAttendanceLogs, page, filters, holidays, exceptions, targetUser, requests, userId, highlightedDate]);
 
-    // Initial Fetch & Filter Change
-    useEffect(() => {
-        const fetchPrerequisites = async () => {
-            const [hRes, eRes] = await Promise.all([
-                supabase.from('annual_holidays').select('*'),
-                supabase.from('calendar_exceptions').select('*')
-            ]);
-            if (hRes.data) setHolidays(hRes.data);
-            if (eRes.data) setExceptions(eRes.data);
-        };
-        fetchPrerequisites();
-    }, []);
+
 
     useEffect(() => {
         fetchData();
@@ -251,11 +254,20 @@ export const useAttendanceHistoryEngine = (userId: string, highlightedDate?: str
     const startTimeStr = masterOptions.find(o => o.type === 'WORK_CONFIG' && o.key === 'START_TIME')?.label || '10:00';
     const lateBufferMinutes = parseInt(masterOptions.find(o => o.type === 'WORK_CONFIG' && o.key === 'LATE_BUFFER')?.label || '0');
 
+    const multipleShifts = useMemo(() => {
+        const shiftsEnabledOpt = masterOptions.find(o => o.type === 'WORK_CONFIG' && o.key === 'MULTIPLE_SHIFTS_ENABLED');
+        const shiftsListOpt = masterOptions.find(o => o.type === 'WORK_CONFIG' && o.key === 'MULTIPLE_SHIFTS_LIST');
+        return {
+            enabled: shiftsEnabledOpt?.label === 'true',
+            shiftsList: shiftsListOpt?.label || ''
+        };
+    }, [masterOptions]);
+
     // Helpers
     const isLate = useCallback((log: AttendanceLog) => {
         if (!log.checkInTime) return false;
-        return checkIsLate(log.checkInTime, startTimeStr, lateBufferMinutes);
-    }, [startTimeStr, lateBufferMinutes]);
+        return checkIsLate(log.checkInTime, startTimeStr, lateBufferMinutes, log.note, multipleShifts);
+    }, [startTimeStr, lateBufferMinutes, multipleShifts]);
 
     const getProofUrl = useCallback((log: AttendanceLog) => {
         if (log.note && log.note.includes('[PROOF:')) {
@@ -266,10 +278,60 @@ export const useAttendanceHistoryEngine = (userId: string, highlightedDate?: str
     }, []);
 
     const getLocationDisplay = useCallback((log: AttendanceLog) => {
+        const isVirtualLeave = !log.checkInTime || log.workType === 'LEAVE';
+
+        if (isVirtualLeave && (log.workType === 'LEAVE' || log.status === 'LEAVE' || log.status === 'PENDING_VERIFY')) {
+            const checkDate = new Date(log.date);
+            checkDate.setHours(12, 0, 0, 0);
+
+            const match = requests.find((req: any) => {
+                if (req.userId !== userId) return false;
+                if (req.status === 'REJECTED') return false;
+                
+                const LEAVE_TYPES = ['SICK', 'VACATION', 'PERSONAL', 'EMERGENCY', 'UNPAID'];
+                if (!LEAVE_TYPES.includes(req.type)) return false;
+
+                const start = new Date(req.startDate);
+                start.setHours(0, 0, 0, 0);
+                const end = new Date(req.endDate);
+                end.setHours(23, 59, 59, 999);
+
+                return checkDate >= start && checkDate <= end;
+            });
+
+            if (match) {
+                switch (match.type) {
+                    case 'SICK':
+                        return 'ลาป่วย (Sick Leave)';
+                    case 'VACATION':
+                        return 'ลาพักร้อน (Vacation Leave)';
+                    case 'PERSONAL':
+                        return 'ลากิจ (Personal Leave)';
+                    case 'EMERGENCY':
+                        return 'ลาฉุกเฉิน (Emergency Leave)';
+                    case 'UNPAID':
+                        return 'ลาไม่รับค่าจ้าง (Unpaid Leave)';
+                    default:
+                        return `ลาประเภท ${match.type}`;
+                }
+            }
+            // Fallback for virtual leave logs without an explicit request object found in range
+            return 'การลา (Leave)';
+        }
+
         if (log.locationName) return log.locationName;
         const meta = parseAttendanceMetadata(log.note);
-        return meta.locationName || (meta.location ? `${meta.location.lat.toFixed(4)}, ${meta.location.lng.toFixed(4)}` : '-');
-    }, []);
+        if (meta.locationName) return meta.locationName;
+        
+        if (log.workType === 'WFH') {
+            return 'ทำงานที่บ้าน (WFH)';
+        }
+        if (log.workType === 'ONSITE' || log.workType === 'SITE') {
+            return 'ปฏิบัติงานนอกสถานที่ (On-site)';
+        }
+        
+        return meta.location ? `${meta.location.lat.toFixed(4)}, ${meta.location.lng.toFixed(4)}` : '-';
+    }, [requests, userId]);
 
     const getWorkHours = useCallback((log: AttendanceLog) => {
         if (!log.checkInTime || !log.checkOutTime) return '-';
@@ -284,7 +346,52 @@ export const useAttendanceHistoryEngine = (userId: string, highlightedDate?: str
         if (log.status === 'ABSENT' && userStartDate && isBefore(startOfDay(new Date(log.date)), startOfDay(userStartDate))) {
             return { label: 'ยังไม่เริ่มงาน', color: 'bg-gray-100 text-gray-500 border-gray-200', icon: HelpCircle };
         }
+
+        const noteText = log.note || '';
+        const isProvisionalForgot = noteText.includes('[PROVISIONAL_FORGOT_CHECKIN]');
+        const isProvisionalWfh = noteText.includes('[PROVISIONAL_WFH]');
+        const isProvisionalOnsite = noteText.includes('[PROVISIONAL_ONSITE]');
+        const isProvisionalLate = noteText.includes('[APPEAL_PENDING]') || noteText.includes('[PROVISIONAL_LATE_ENTRY]');
+        const isEarlyLeave = noteText.includes('[REJECTED EARLY_LEAVE_APPEAL]') || noteText.includes('[ACCEPT_PENALTY]') || noteText.includes('[APPROVED EARLY_LEAVE_APPEAL]') || noteText.includes('[APPROVED EARLY_LEAVE]');
+
+        if (isEarlyLeave) {
+            return { label: 'กลับก่อนเวลา', color: 'bg-orange-100 text-orange-700 border-orange-200', icon: Clock };
+        }
+
+        if (log.status === 'WORKING') {
+            if (isProvisionalForgot) {
+                return { label: 'กำลังทำงาน (จำลองลืมลงเวลา)', color: 'bg-amber-100 text-amber-700 border-amber-200', icon: Loader2 };
+            }
+            if (isProvisionalWfh) {
+                return { label: 'กำลังทำงาน (WFH จำลอง)', color: 'bg-blue-100 text-blue-700 border-blue-200', icon: Loader2 };
+            }
+            if (isProvisionalOnsite) {
+                return { label: 'กำลังทำงาน (On-site จำลอง)', color: 'bg-orange-100 text-orange-700 border-orange-200', icon: Loader2 };
+            }
+            if (isProvisionalLate) {
+                return { label: 'กำลังทำงาน (แจ้งเข้าสายจำลอง)', color: 'bg-violet-100 text-violet-700 border-violet-200', icon: Loader2 };
+            }
+        }
+
+        if ((log.status === 'COMPLETED' || log.status === 'LATE' || log.status === 'PENDING_VERIFY') && isProvisionalForgot) {
+            return { label: 'รออนุมัติเข้างาน (ลืมลงเวลา)', color: 'bg-amber-100 text-amber-700 border-amber-200', icon: Clock };
+        }
+
+        if ((log.status === 'COMPLETED' || log.status === 'LATE' || log.status === 'PENDING_VERIFY') && isProvisionalLate) {
+            return { label: 'รออนุมัติเข้างาน (ขอเข้าสาย)', color: 'bg-violet-100 text-violet-700 border-violet-200', icon: Clock };
+        }
+
+        if ((log.status === 'COMPLETED' || log.status === 'LATE' || log.status === 'PENDING_VERIFY') && isProvisionalWfh) {
+            return { label: 'รออนุมัติเข้างาน (WFH จำลอง)', color: 'bg-blue-100 text-blue-700 border-blue-200', icon: Clock };
+        }
+
+        if ((log.status === 'COMPLETED' || log.status === 'LATE' || log.status === 'PENDING_VERIFY') && isProvisionalOnsite) {
+            return { label: 'รออนุมัติเข้างาน (On-site จำลอง)', color: 'bg-orange-100 text-orange-700 border-orange-200', icon: Clock };
+        }
+
         switch (log.status) {
+            case 'APPEAL':
+                return { label: 'อยู่ระหว่างการอุทธรณ์', color: 'bg-violet-100 text-violet-700 border-violet-200', icon: Clock };
             case 'COMPLETED':
             case 'ON_TIME': // In case we use specific status
                 return { label: 'ปกติ', color: 'bg-green-100 text-green-700 border-green-200', icon: CheckCircle2 };

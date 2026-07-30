@@ -2,8 +2,10 @@ import React from 'react';
 import { format } from 'date-fns';
 import th from 'date-fns/locale/th';
 import { Clock, ArrowRight } from 'lucide-react';
+import { parseReason } from '../../leave-request/request-detail/utils';
+import { AttendanceConditionBadges, AttendanceReasonBox } from '../../shared/AttendanceBadges';
 
-export type RecordVariant = 'on-time' | 'late' | 'absent' | 'leave';
+export type RecordVariant = 'on-time' | 'late' | 'absent' | 'leave' | 'appeal';
 
 interface AttendanceRecordCardProps {
     date: Date;
@@ -11,6 +13,9 @@ interface AttendanceRecordCardProps {
     timeLabel?: string;
     badgeText?: string;
     note?: string;
+    checkInTime?: string;
+    checkOutTime?: string;
+    onClick?: () => void;
 }
 
 export const AttendanceRecordCard: React.FC<AttendanceRecordCardProps> = ({
@@ -18,8 +23,21 @@ export const AttendanceRecordCard: React.FC<AttendanceRecordCardProps> = ({
     variant,
     timeLabel,
     badgeText,
-    note
+    note,
+    checkInTime,
+    checkOutTime,
+    onClick
 }) => {
+    const parsed = parseReason(note || '', checkInTime, checkOutTime);
+    const isProvisionalWfh = parsed.isProvisionalWfh;
+    const isProvisionalOnsite = parsed.isProvisionalOnsite;
+    const isProvisionalForgotCheckin = parsed.isProvisionalForgotCheckin;
+    const isProvisionalCheckout = parsed.isProvisionalCheckout;
+    const isProvisionalLate = parsed.cleanReason.includes('[APPEAL_PENDING]') || note?.includes('[APPEAL_PENDING]') || note?.includes('[PROVISIONAL_LATE_ENTRY]');
+    const isProvisional = variant !== 'leave' && (isProvisionalWfh || isProvisionalOnsite || isProvisionalForgotCheckin || isProvisionalCheckout || isProvisionalLate);
+
+    const isRejectedLeave = variant === 'leave' && (note?.includes('[REJECTED') || note?.includes('ปฏิเสธ'));
+
     // Style configuration based on variant
     const config = {
         'on-time': {
@@ -42,6 +60,16 @@ export const AttendanceRecordCard: React.FC<AttendanceRecordCardProps> = ({
             badgeText: 'text-amber-600',
             iconColor: 'text-amber-400'
         },
+        'appeal': {
+            bg: 'bg-violet-50',
+            border: 'border-violet-100',
+            textPrimary: 'text-violet-600',
+            textSecondary: 'text-violet-400',
+            hoverShadow: 'hover:shadow-violet-100/50',
+            badgeBg: 'bg-violet-100',
+            badgeText: 'text-violet-600',
+            iconColor: 'text-violet-400'
+        },
         'absent': {
             bg: 'bg-rose-50',
             border: 'border-rose-100',
@@ -61,49 +89,80 @@ export const AttendanceRecordCard: React.FC<AttendanceRecordCardProps> = ({
             badgeBg: 'bg-sky-100',
             badgeText: 'text-sky-600',
             iconColor: 'text-sky-400'
+        },
+        'leave-rejected': {
+            bg: 'bg-rose-50',
+            border: 'border-rose-100',
+            textPrimary: 'text-rose-600',
+            textSecondary: 'text-rose-400',
+            hoverShadow: 'hover:shadow-rose-100/50',
+            badgeBg: 'bg-rose-100',
+            badgeText: 'text-rose-600',
+            iconColor: 'text-rose-400'
         }
-    }[variant];
+    }[isRejectedLeave ? 'leave-rejected' : variant];
+
+    const hasCleanReason = !!parsed.cleanReason?.trim();
+    const showNoteBox = isProvisional || hasCleanReason;
 
     return (
-        <div className={`flex items-center justify-between p-4 bg-white rounded-[2rem] border ${config.border} group hover:shadow-lg ${config.hoverShadow} transition-all`}>
-            <div className="flex items-center gap-4">
-                <div className={`w-14 h-14 ${config.bg} rounded-2xl flex flex-col items-center justify-center border ${config.border}`}>
-                    <span className={`text-[10px] font-black ${config.textSecondary} uppercase`}>
-                        {format(date, 'EEE')}
-                    </span>
-                    <span className={`text-lg font-black ${config.textPrimary}`}>
-                        {format(date, 'd')}
-                    </span>
-                </div>
-                <div className="text-left">
-                    <p className="text-xs font-black text-slate-700">
-                        {format(date, 'MMMM yyyy', { locale: th })}
-                    </p>
-                    <div className="flex items-center gap-2 mt-0.5">
-                        <span className={`px-2 py-0.5 ${config.badgeBg} ${config.badgeText} rounded-lg text-[9px] font-black uppercase`}>
-                            {badgeText || variant.toUpperCase()}
+        <div 
+            onClick={onClick}
+            className={`flex flex-col gap-2.5 p-4 bg-white rounded-[2rem] border ${config.border} group hover:shadow-lg ${config.hoverShadow} ${onClick ? 'cursor-pointer hover:-translate-y-0.5 hover:border-indigo-200' : ''} transition-all`}
+        >
+            <div className="flex items-center justify-between">
+                <div className="flex items-center gap-4">
+                    <div className={`w-14 h-14 ${config.bg} rounded-2xl flex flex-col items-center justify-center border ${config.border} shrink-0`}>
+                        <span className={`text-[10px] font-bold ${config.textSecondary} uppercase`}>
+                            {format(date, 'EEE')}
                         </span>
-                        {variant === 'absent' ? (
-                            <p className="text-[10px] font-bold text-rose-400">
-                                {timeLabel || 'No record found'}
-                            </p>
-                        ) : variant === 'leave' ? (
-                            <p className="text-[10px] font-bold text-slate-400 italic truncate max-w-[150px]">
-                                "{note || 'No reason'}"
-                            </p>
-                        ) : (
-                            <p className="text-[10px] font-bold text-slate-400 flex items-center gap-1">
-                                <Clock className="w-3 h-3" /> {timeLabel || '--:--'}
-                            </p>
-                        )}
+                        <span className={`text-lg font-bold ${config.textPrimary}`}>
+                            {format(date, 'd')}
+                        </span>
+                    </div>
+                    <div className="text-left">
+                        <p className="text-xs font-bold text-slate-700">
+                            {format(date, 'MMMM yyyy', { locale: th })}
+                        </p>
+                        <div className="flex flex-wrap items-center gap-1.5 mt-1">
+                            <span className={`px-2 py-0.5 ${config.badgeBg} ${config.badgeText} rounded-lg text-[9px] font-bold uppercase shrink-0`}>
+                                {badgeText || variant.toUpperCase()}
+                            </span>
+                            <AttendanceConditionBadges parsed={parsed} size="sm" hideProvisional={variant === 'leave'} />
+                            {variant === 'absent' ? (
+                                <p className="text-[10px] font-bold text-rose-400 ml-1">
+                                    {timeLabel || 'No record found'}
+                                </p>
+                            ) : variant === 'leave' ? (
+                                <div className="flex flex-wrap items-center gap-1.5 ml-1">
+                                    {isRejectedLeave && (
+                                        <span className="text-[9px] font-extrabold text-rose-600 bg-rose-100 px-1.5 py-0.5 rounded-md uppercase shrink-0">
+                                            ไม่อนุมัติ
+                                        </span>
+                                    )}
+                                    <p className="text-[10px] font-bold text-slate-400 italic truncate max-w-[150px]">
+                                        "{parsed.cleanReason || 'No reason'}"
+                                    </p>
+                                </div>
+                            ) : (
+                                <p className="text-[10px] font-bold text-slate-400 flex items-center gap-1 ml-1">
+                                    <Clock className="w-3 h-3" /> {timeLabel || '--:--'}
+                                </p>
+                            )}
+                        </div>
+                    </div>
+                </div>
+                <div className="text-right shrink-0">
+                    <div className={`w-8 h-8 rounded-full ${config.bg} flex items-center justify-center ${config.iconColor} opacity-0 group-hover:opacity-100 transition-opacity`}>
+                        <ArrowRight className="w-4 h-4" />
                     </div>
                 </div>
             </div>
-            <div className="text-right">
-                <div className={`w-8 h-8 rounded-full ${config.bg} flex items-center justify-center ${config.iconColor} opacity-0 group-hover:opacity-100 transition-opacity`}>
-                    <ArrowRight className="w-4 h-4" />
-                </div>
-            </div>
+
+            {/* Display clean reasons or provisional descriptions using central AttendanceReasonBox */}
+            {showNoteBox && (
+                <AttendanceReasonBox parsed={parsed} rawNote={note} showTitle={false} />
+            )}
         </div>
     );
 };

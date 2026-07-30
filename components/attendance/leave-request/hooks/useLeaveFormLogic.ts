@@ -1,11 +1,16 @@
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { format, startOfDay, isBefore } from 'date-fns';
 import { LeaveType } from '../../../../types/attendance';
 import { useGlobalDialog } from '../../../../context/GlobalDialogContext';
+import { getRegistryItem } from '../../../../constants/attendanceRegistry';
+import { useMasterData } from '../../../../hooks/useMasterData';
+import { useUserSession } from '../../../../context/UserSessionContext';
+import { calculateShiftAndActualTime, formatCorrectionNote, calculateRequiredCheckOutTime, isValidCheckOutTime } from '../../../../utils/shiftCalculator';
+import { compressImage } from '../../../../lib/imageUtils';
 
 interface UseLeaveFormLogicProps {
-    onSubmit: (type: LeaveType, start: Date, end: Date, reason: string, file?: File) => Promise<boolean>;
+    onSubmit: (type: LeaveType, start: Date, end: Date, reason: string, file?: File, linkedRemoteType?: 'WFH' | 'ONSITE') => Promise<boolean>;
     onClose: () => void;
     initialDate?: Date;
     initialReason?: string;
@@ -13,15 +18,26 @@ interface UseLeaveFormLogicProps {
     advanceDays?: number;
     maxFutureDays?: number;
     maxPastDays?: number;
+    linkedRemoteType?: 'WFH' | 'ONSITE';
 }
-
-import { compressImage } from '../../../../lib/imageUtils';
 
 export const useLeaveFormLogic = ({ 
     onSubmit, onClose, initialDate, initialReason, selectedType, 
-    advanceDays, maxFutureDays, maxPastDays 
+    advanceDays, maxFutureDays, maxPastDays, linkedRemoteType
 }: UseLeaveFormLogicProps) => {
     const { showAlert } = useGlobalDialog();
+    const { masterOptions } = useMasterData();
+    const { attendanceLogs } = useUserSession();
+
+    const shiftsEnabledOpt = masterOptions?.find(o => o.type === 'WORK_CONFIG' && o.key === 'MULTIPLE_SHIFTS_ENABLED');
+    const shiftsListOpt = masterOptions?.find(o => o.type === 'WORK_CONFIG' && o.key === 'MULTIPLE_SHIFTS_LIST');
+    const isShiftsEnabled = shiftsEnabledOpt ? shiftsEnabledOpt.label === 'true' : true;
+    const shiftsList = useMemo(() => {
+        if (shiftsListOpt?.label) {
+            return shiftsListOpt.label.split(',').map(s => s.trim()).filter(Boolean);
+        }
+        return ['08:00', '08:30', '09:00'];
+    }, [shiftsListOpt]);
     const [startDate, setStartDate] = useState('');
     const [endDate, setEndDate] = useState('');
     const [reason, setReason] = useState(initialReason || ''); // Use initialReason
@@ -29,36 +45,97 @@ export const useLeaveFormLogic = ({
     const [targetTime, setTargetTime] = useState('09:00');
     const [endTime, setEndTime] = useState('18:00'); // New state for FORGOT_BOTH
     const [otHours, setOtHours] = useState(2);
+    const [otType, setOtType] = useState<'HOURLY' | 'FIXED'>('HOURLY');
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [isReviewing, setIsReviewing] = useState(false);
 
     const initialDateStr = initialDate ? format(initialDate, 'yyyy-MM-dd') : '';
 
     useEffect(() => {
-        const d = initialDateStr || format(new Date(), 'yyyy-MM-dd');
+        const item = selectedType ? getRegistryItem(selectedType) : undefined;
+        let d = initialDateStr;
+        
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const minAllowed = new Date(today);
+        if (advanceDays && advanceDays > 0) {
+            minAllowed.setDate(today.getDate() + advanceDays);
+        }
+
+        if (!d) {
+            // No initial date, default to today + advanceDays (or today)
+            if (selectedType === 'FORGOT_BOTH') {
+                const yesterday = new Date();
+                yesterday.setDate(yesterday.getDate() - 1);
+                d = format(yesterday, 'yyyy-MM-dd');
+            } else if (item?.rules.forceTodayDate) {
+                d = format(new Date(), 'yyyy-MM-dd');
+            } else {
+                d = format(minAllowed, 'yyyy-MM-dd');
+            }
+        } else {
+            // If initial date is provided (e.g. from past log correction or resubmit),
+            // preserve it for CORRECTION category or when initialDate is explicitly passed.
+            const isCorrection = item?.category === 'CORRECTION';
+            if (!isCorrection && !item?.rules.forceTodayDate && advanceDays && advanceDays > 0) {
+                const parsedInitial = new Date(d);
+                parsedInitial.setHours(0, 0, 0, 0);
+                if (parsedInitial < minAllowed) {
+                    d = format(minAllowed, 'yyyy-MM-dd');
+                }
+            }
+        }
         setStartDate(d);
         setEndDate(d);
         setReason(initialReason || '');
         setFile(null);
         setIsReviewing(false);
+        setOtType('HOURLY');
         
-        // Set sensible defaults based on type
-        if (selectedType === 'FORGOT_CHECKOUT') {
-            setTargetTime('18:00');
-        } else if (selectedType === 'FORGOT_CHECKIN' || selectedType === 'LATE_ENTRY') {
-            setTargetTime('09:00');
-        } else if (selectedType === 'FORGOT_BOTH') {
-            setTargetTime('09:00');
-            setEndTime('18:00');
-        } else if (selectedType === 'OVERTIME') {
-            setTargetTime('18:30');
-            setEndTime('20:30');
+        // Set sensible defaults based on the central registry configuration
+        if (selectedType === 'LATE_ENTRY') {
+            const now = new Date();
+            const currentHours = String(now.getHours()).padStart(2, '0');
+            const currentMinutes = String(now.getMinutes()).padStart(2, '0');
+            setTargetTime(`${currentHours}:${currentMinutes}`);
         } else {
-            setTargetTime('09:00');
+            setTargetTime(item?.rules.defaultTargetTime || '09:00');
         }
+        setEndTime(item?.rules.defaultEndTime || '18:00');
         
         setOtHours(2);
-    }, [initialDateStr, initialReason, selectedType]);
+    }, [initialDateStr, initialReason, selectedType, advanceDays]);
+
+    // Automatically sync endDate with startDate for single-day/time-specific requests
+    useEffect(() => {
+        const item = selectedType ? getRegistryItem(selectedType) : undefined;
+        if (item && (item.rules.isSingleDay || item.rules.isTimeSpecific)) {
+            setEndDate(startDate);
+        }
+    }, [startDate, selectedType]);
+
+    // Sync earliest required checkout time when selectedType is FORGOT_CHECKOUT
+    useEffect(() => {
+        if (isShiftsEnabled && selectedType === 'FORGOT_CHECKOUT' && startDate) {
+            const log = attendanceLogs?.find(l => l.date === startDate);
+            if (log?.checkInTime) {
+                const checkInDate = new Date(log.checkInTime);
+                const checkInStr = format(checkInDate, 'HH:mm');
+                const minHours = parseFloat(masterOptions?.find(o => o.key === 'MIN_HOURS')?.label || '9');
+                const requiredCheckOut = calculateRequiredCheckOutTime(checkInStr, minHours);
+                setTargetTime(requiredCheckOut);
+            }
+        }
+    }, [startDate, selectedType, isShiftsEnabled, attendanceLogs, masterOptions]);
+
+    // Sync earliest required checkout time when selectedType is FORGOT_BOTH
+    useEffect(() => {
+        if (isShiftsEnabled && selectedType === 'FORGOT_BOTH' && targetTime) {
+            const minHours = parseFloat(masterOptions?.find(o => o.key === 'MIN_HOURS')?.label || '9');
+            const requiredCheckOut = calculateRequiredCheckOutTime(targetTime, minHours);
+            setEndTime(requiredCheckOut);
+        }
+    }, [targetTime, selectedType, isShiftsEnabled, masterOptions]);
 
     const handleReview = () => {
         if (!startDate || !endDate) {
@@ -107,6 +184,44 @@ export const useLeaveFormLogic = ({
             }
         }
 
+        const item = selectedType ? getRegistryItem(selectedType) : undefined;
+        if (item && item.category === 'CORRECTION') {
+            const today = startOfDay(new Date());
+            if (isBefore(today, startOfDay(start))) {
+                showAlert('ไม่สามารถทำรายการลืมลงเวลารูปแบบล่วงหน้าได้ครับ', 'วันที่ไม่ถูกต้อง');
+                return;
+            }
+        }
+
+        if (isShiftsEnabled) {
+            const minHours = parseFloat(masterOptions?.find(o => o.key === 'MIN_HOURS')?.label || '9');
+            
+            if (selectedType === 'FORGOT_CHECKOUT') {
+                const log = attendanceLogs?.find(l => l.date === startDate);
+                if (log?.checkInTime) {
+                    const checkInDate = new Date(log.checkInTime);
+                    const checkInStr = format(checkInDate, 'HH:mm');
+                    if (!isValidCheckOutTime(checkInStr, targetTime, minHours)) {
+                        const requiredCheckOut = calculateRequiredCheckOutTime(checkInStr, minHours);
+                        showAlert(
+                            `เวลาออกงานต้องทำงานอย่างน้อย ${minHours} ชั่วโมงครับ (เร็วที่สุดสำหรับวันดังกล่าวคือตั้งแต่เวลา ${requiredCheckOut} น. เป็นต้นไป)`,
+                            'เวลาออกงานไม่ถูกต้อง'
+                        );
+                        return;
+                    }
+                }
+            } else if (selectedType === 'FORGOT_BOTH') {
+                if (!isValidCheckOutTime(targetTime, endTime, minHours)) {
+                    const requiredCheckOut = calculateRequiredCheckOutTime(targetTime, minHours);
+                    showAlert(
+                        `เวลาออกงานต้องทำงานอย่างน้อย ${minHours} ชั่วโมงจากเวลาเข้างานครับ (เร็วที่สุดคือตั้งแต่เวลา ${requiredCheckOut} น. เป็นต้นไป)`,
+                        'เวลาออกงานไม่ถูกต้อง'
+                    );
+                    return;
+                }
+            }
+        }
+
         if (!reason.trim()) {
             showAlert('กรุณาระบุเหตุผลด้วยครับ', 'ข้อมูลไม่ครบ');
             return;
@@ -132,22 +247,51 @@ export const useLeaveFormLogic = ({
         let finalEndDate = new Date(endDate);
         let finalReason = reason;
 
-        if (['LATE_ENTRY', 'FORGOT_CHECKIN', 'FORGOT_CHECKOUT', 'FORGOT_BOTH'].includes(selectedType)) {
-            // Combine date and time correctly to avoid midnight issue
+        const item = getRegistryItem(selectedType);
+        if (item && item.rules.isTimeSpecific && selectedType !== 'OVERTIME') {
             const [year, month, day] = startDate.split('-').map(Number);
-            const [hours, minutes] = targetTime.split(':').map(Number);
-            finalStartDate = new Date(year, month - 1, day, hours, minutes, 0, 0);
-            
-            if (selectedType === 'FORGOT_BOTH') {
-                finalReason = `[TIME:${targetTime}-${endTime}] ${reason}`;
-                const [endH, endM] = endTime.split(':').map(Number);
-                finalEndDate = new Date(year, month - 1, day, endH, endM, 0, 0);
+            const isCheckInCorrection = ['FORGOT_CHECKIN', 'FORGOT_BOTH', 'LATE_ENTRY'].includes(selectedType);
+
+            if (isShiftsEnabled && isCheckInCorrection) {
+                const shiftCalc = calculateShiftAndActualTime(targetTime, shiftsList);
+                const mappedShift = shiftCalc.targetShift;
+                const actualCheckIn = shiftCalc.actualTime;
+
+                if (selectedType === 'LATE_ENTRY') {
+                    const [targetH, targetM] = targetTime.split(':').map(Number);
+                    finalStartDate = new Date(year, month - 1, day, targetH, targetM, 0, 0);
+                } else {
+                    const [actualH, actualM] = actualCheckIn.split(':').map(Number);
+                    finalStartDate = new Date(year, month - 1, day, actualH, actualM, 0, 0);
+                }
+
+                if (selectedType === 'FORGOT_BOTH') {
+                    finalReason = formatCorrectionNote(mappedShift, actualCheckIn, reason, endTime);
+                    const [endH, endM] = endTime.split(':').map(Number);
+                    finalEndDate = new Date(year, month - 1, day, endH, endM, 0, 0);
+                } else {
+                    finalReason = formatCorrectionNote(mappedShift, actualCheckIn, reason);
+                    finalEndDate = finalStartDate;
+                }
             } else {
-                finalReason = `[TIME:${targetTime}] ${reason}`;
-                finalEndDate = finalStartDate; 
+                const [hours, minutes] = targetTime.split(':').map(Number);
+                finalStartDate = new Date(year, month - 1, day, hours, minutes, 0, 0);
+                
+                if (selectedType === 'FORGOT_BOTH') {
+                    finalReason = `[TARGET_SHIFT:${targetTime}] [TIME:${targetTime}-${endTime}] ${reason}`;
+                    const [endH, endM] = endTime.split(':').map(Number);
+                    finalEndDate = new Date(year, month - 1, day, endH, endM, 0, 0);
+                } else {
+                    finalReason = `[TARGET_SHIFT:${targetTime}] [TIME:${targetTime}] ${reason}`;
+                    finalEndDate = finalStartDate; 
+                }
             }
         } else if (selectedType === 'OVERTIME') {
-            finalReason = `[OT:${targetTime}-${endTime}] (${otHours}hr) ${reason}`;
+            if (otType === 'FIXED') {
+                finalReason = `[OT:FIXED] [OT:00:00-00:00] (0hr) ${reason}`;
+            } else {
+                finalReason = `[OT:${targetTime}-${endTime}] (${otHours}hr) ${reason}`;
+            }
             finalEndDate = finalStartDate;
         }
 
@@ -156,7 +300,8 @@ export const useLeaveFormLogic = ({
             finalStartDate,
             finalEndDate,
             finalReason,
-            finalFile || undefined
+            finalFile || undefined,
+            linkedRemoteType
         );
 
         setIsSubmitting(false);
@@ -171,6 +316,7 @@ export const useLeaveFormLogic = ({
         targetTime, setTargetTime,
         endTime, setEndTime,
         otHours, setOtHours,
+        otType, setOtType,
         isSubmitting,
         isReviewing,
         setIsReviewing,

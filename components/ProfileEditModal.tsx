@@ -5,6 +5,7 @@ import { X, Save, Loader2, Send, CheckCircle, Trash2, AlertTriangle } from 'luci
 import { User as UserType } from '../types';
 import ImageCropper from './ImageCropper';
 import { useGlobalDialog } from '../context/GlobalDialogContext';
+import { useToast } from '../context/ToastContext';
 import { useProfileForm } from '../hooks/useProfileForm';
 import { EMOJI_POOL } from '../constants/emojis';
 import ProfileAvatarUploader from './profile/ProfileAvatarUploader';
@@ -24,12 +25,35 @@ interface ProfileEditModalProps {
 
 const ProfileEditModal: React.FC<ProfileEditModalProps> = ({ isOpen, onClose, user, onSave }) => {
   const { showAlert } = useGlobalDialog();
+  const { showToast } = useToast();
   const [showFullImage, setShowFullImage] = useState(false);
 
   // LINE Connection Test States
   const [testState, setTestState] = useState<'IDLE' | 'TESTING' | 'SENT' | 'ERROR'>('IDLE');
   const [testError, setTestError] = useState<string | null>(null);
   const [createdNotifId, setCreatedNotifId] = useState<string | null>(null);
+
+  const handleSaveWrapped = async (updates: Partial<UserType>, file?: File) => {
+    const success = await onSave(updates, file);
+    if (success) {
+      const cleanNewEmail = updates.email?.trim().toLowerCase();
+      const currentCleanEmail = (user.email || '').trim().toLowerCase();
+      
+      const isMockNewEmail = cleanNewEmail?.endsWith('@juijui.local') || cleanNewEmail?.endsWith('@juijui-app.com');
+      const isMockCurrentEmail = currentCleanEmail.endsWith('@juijui.local') || currentCleanEmail.endsWith('@juijui-app.com') || !currentCleanEmail;
+
+      if (cleanNewEmail && cleanNewEmail !== currentCleanEmail && !isMockNewEmail) {
+        if (isMockCurrentEmail) {
+          showToast('เชื่อมต่ออีเมลของคุณกับระบบเสร็จสมบูรณ์! ตอนนี้คุณสามารถใช้อีเมลนี้ในการล็อกอินและกู้คืนรหัสผ่านได้ทันทีครับ 📧✨', 'success');
+        } else {
+          showToast('ระบบส่งลิงก์ยืนยันไปที่อีเมลใหม่เรียบร้อยแล้ว! อย่าลืมเข้าไปกดยืนยันในกล่องจดหมายของคุณเพื่อเปิดใช้งานการกู้คืนรหัสผ่านนะครับ 📧✨', 'success');
+        }
+      } else {
+        showToast('บันทึกการแก้ไขโปรไฟล์เรียบร้อยแล้ว ✨', 'success');
+      }
+    }
+    return success;
+  };
 
   const {
     formState,
@@ -38,12 +62,13 @@ const ProfileEditModal: React.FC<ProfileEditModalProps> = ({ isOpen, onClose, us
     handleCropComplete,
     handleStatusChange,
     handleSubmit
-  } = useProfileForm({ user, onSave, onClose });
+  } = useProfileForm({ user, onSave: handleSaveWrapped, onClose });
 
   const {
     name, setName,
     position, setPosition,
     phone, setPhone,
+    email, setEmail,
     bio, setBio,
     feeling, setFeeling,
     workStatus,
@@ -86,7 +111,8 @@ const ProfileEditModal: React.FC<ProfileEditModalProps> = ({ isOpen, onClose, us
           title: '🔔 ทดสอบเชื่อมต่อ LINE สำเร็จ!',
           message: 'นี่คือข้อความทดสอบจากระบบ Juijui App เพื่อยืนยันว่า LINE User ID ของคุณใช้งานได้ถูกต้องเป็นปกติ',
           is_read: false,
-          link_path: 'ATTENDANCE'
+          link_path: 'ATTENDANCE',
+          line_status: null
         })
         .select('*')
         .single();
@@ -208,11 +234,13 @@ const ProfileEditModal: React.FC<ProfileEditModalProps> = ({ isOpen, onClose, us
                     name={name}
                     position={position}
                     phone={phone}
+                    email={email}
                     positions={positions}
                     user={user}
                     onNameChange={setName}
                     onPositionChange={setPosition}
                     onPhoneChange={setPhone}
+                    onEmailChange={setEmail}
                 />
 
                 {/* 8-bit Emoji Picker Selection */}

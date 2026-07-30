@@ -6,7 +6,7 @@ import { useGlobalDialog } from '../../../../context/GlobalDialogContext';
 import { motion, AnimatePresence } from 'framer-motion';
 
 // Modular Rules Components
-import WorkTimeCard from './rules/WorkTimeCard';
+import WorkTimeCard, { WorkTimeConfig } from './rules/WorkTimeCard';
 import LocationGeofencingCard from './rules/LocationGeofencingCard';
 import SelfieVerificationCard from './rules/SelfieVerificationCard';
 import TypesManagementCard from './rules/TypesManagementCard';
@@ -34,7 +34,7 @@ const AttendanceRulesView: React.FC<AttendanceRulesViewProps> = ({
     const [activeTab, setActiveTab] = useState<TabType>('time');
 
     // Attendance Rules Local State
-    const [tempTimeConfig, setTempTimeConfig] = useState({ 
+    const [tempTimeConfig, setTempTimeConfig] = useState<WorkTimeConfig>({ 
         start: '10:00', 
         end: '19:00', 
         buffer: '15', 
@@ -43,7 +43,21 @@ const AttendanceRulesView: React.FC<AttendanceRulesViewProps> = ({
         checkoutPenaltyTime: '06:00',
         dailySummaryDelayHours: '1',
         lineSummaryDestination: '',
-        enableAttendanceRace: 'true'
+        enableAttendanceRace: 'true',
+        lateAlertMode: 'AFTER_LIMIT',
+        lateAlertOffset: '5',
+        multipleShiftsEnabled: 'false',
+        multipleShiftsList: '08:00, 08:30, 09:00',
+        lineApprovalMode: 'INTERACTIVE',
+        lineHeaderTitle: 'Juijui Alert Center',
+        lateAlertTargetRoles: 'BOTH',
+        checkoutPenaltyTargetRoles: 'BOTH',
+        checkoutAlertEnabled: 'true',
+        checkoutAlertMode: 'AFTER_LIMIT',
+        checkoutAlertOffset: '5',
+        checkoutAlertTargetRoles: 'BOTH',
+        adminAbsentPenaltyEnabled: 'false',
+        forgotCheckInLimitHours: '12'
     });
     const [isStartTimeOpen, setIsStartTimeOpen] = useState(false);
     const [isEndTimeOpen, setIsEndTimeOpen] = useState(false);
@@ -54,10 +68,6 @@ const AttendanceRulesView: React.FC<AttendanceRulesViewProps> = ({
     const [selfieMode, setSelfieMode] = useState<string>('ALWAYS_ON');
     const [selfieDays, setSelfieDays] = useState<string>('3');
     const [isSavingSelfie, setIsSavingSelfie] = useState(false);
-    
-    // Location Config State
-    const [officeConfig, setOfficeConfig] = useState({ lat: '', lng: '', radius: '500' });
-    const [isLocating, setIsLocating] = useState(false);
 
     // Sync Temp Config with Loaded Data
     useEffect(() => {
@@ -69,10 +79,25 @@ const AttendanceRulesView: React.FC<AttendanceRulesViewProps> = ({
         const otThresholdOpt = masterOptions.find(o => o.type === 'WORK_CONFIG' && o.key === 'OT_THRESHOLD_HOURS');
         const checkoutPenaltyTimeOpt = masterOptions.find(o => o.type === 'WORK_CONFIG' && o.key === 'CHECKOUT_PENALTY_TIME');
         const dailySummaryDelayHoursOpt = masterOptions.find(o => o.type === 'WORK_CONFIG' && o.key === 'DAILY_SUMMARY_DELAY_HOURS');
+        const dailySummaryTimeOpt = masterOptions.find(o => o.type === 'WORK_CONFIG' && o.key === 'DAILY_SUMMARY_TIME');
         const lineSummaryDestinationOpt = masterOptions.find(o => o.type === 'WORK_CONFIG' && o.key === 'LINE_SUMMARY_DESTINATION');
         const enableRaceOpt = masterOptions.find(o => o.type === 'WORK_CONFIG' && o.key === 'ENABLE_ATTENDANCE_RACE');
+        const lateAlertModeOpt = masterOptions.find(o => o.type === 'WORK_CONFIG' && o.key === 'LATE_ALERT_MODE');
+        const lateAlertOffsetOpt = masterOptions.find(o => o.type === 'WORK_CONFIG' && o.key === 'LATE_ALERT_OFFSET');
+        const shiftsEnabledOpt = masterOptions.find(o => o.type === 'WORK_CONFIG' && o.key === 'MULTIPLE_SHIFTS_ENABLED');
+        const shiftsListOpt = masterOptions.find(o => o.type === 'WORK_CONFIG' && o.key === 'MULTIPLE_SHIFTS_LIST');
+        const lineApprovalModeOpt = masterOptions.find(o => o.type === 'WORK_CONFIG' && o.key === 'LINE_APPROVAL_MODE');
+        const lineHeaderTitleOpt = masterOptions.find(o => o.type === 'WORK_CONFIG' && o.key === 'LINE_HEADER_TITLE');
+        const lateAlertTargetRolesOpt = masterOptions.find(o => o.type === 'WORK_CONFIG' && o.key === 'LATE_ALERT_TARGET_ROLES');
+        const checkoutPenaltyTargetRolesOpt = masterOptions.find(o => o.type === 'WORK_CONFIG' && o.key === 'CHECKOUT_PENALTY_TARGET_ROLES');
+        const checkoutAlertEnabledOpt = masterOptions.find(o => o.type === 'WORK_CONFIG' && o.key === 'CHECKOUT_ALERT_ENABLED');
+        const checkoutAlertModeOpt = masterOptions.find(o => o.type === 'WORK_CONFIG' && o.key === 'CHECKOUT_ALERT_MODE');
+        const checkoutAlertOffsetOpt = masterOptions.find(o => o.type === 'WORK_CONFIG' && o.key === 'CHECKOUT_ALERT_OFFSET');
+        const checkoutAlertTargetRolesOpt = masterOptions.find(o => o.type === 'WORK_CONFIG' && o.key === 'CHECKOUT_ALERT_TARGET_ROLES');
+        const adminAbsentPenaltyEnabledOpt = masterOptions.find(o => o.type === 'WORK_CONFIG' && o.key === 'ADMIN_ABSENT_PENALTY_ENABLED');
+        const forgotCheckInLimitHoursOpt = masterOptions.find(o => o.type === 'WORK_CONFIG' && o.key === 'FORGOT_CHECKIN_LIMIT_HOURS');
         
-        if (startOpt || endOpt || bufferOpt || minHoursOpt || otThresholdOpt || checkoutPenaltyTimeOpt || dailySummaryDelayHoursOpt || lineSummaryDestinationOpt || enableRaceOpt) {
+        if (startOpt || endOpt || bufferOpt || minHoursOpt || otThresholdOpt || checkoutPenaltyTimeOpt || dailySummaryDelayHoursOpt || dailySummaryTimeOpt || lineSummaryDestinationOpt || enableRaceOpt || lateAlertModeOpt || lateAlertOffsetOpt || shiftsEnabledOpt || shiftsListOpt || lineApprovalModeOpt || lineHeaderTitleOpt || lateAlertTargetRolesOpt || checkoutPenaltyTargetRolesOpt || checkoutAlertEnabledOpt || checkoutAlertModeOpt || checkoutAlertOffsetOpt || checkoutAlertTargetRolesOpt || adminAbsentPenaltyEnabledOpt || forgotCheckInLimitHoursOpt) {
             setTempTimeConfig({
                 start: startOpt?.label || '10:00',
                 end: endOpt?.label || '19:00',
@@ -81,8 +106,23 @@ const AttendanceRulesView: React.FC<AttendanceRulesViewProps> = ({
                 otThreshold: otThresholdOpt?.label || '2',
                 checkoutPenaltyTime: checkoutPenaltyTimeOpt?.label || '06:00',
                 dailySummaryDelayHours: dailySummaryDelayHoursOpt?.label || '1',
+                dailySummaryTime: dailySummaryTimeOpt?.label || '18:00',
                 lineSummaryDestination: lineSummaryDestinationOpt?.label || '',
-                enableAttendanceRace: enableRaceOpt?.label || 'true'
+                enableAttendanceRace: enableRaceOpt?.label || 'true',
+                lateAlertMode: lateAlertModeOpt?.label || 'AFTER_LIMIT',
+                lateAlertOffset: lateAlertOffsetOpt?.label || '5',
+                multipleShiftsEnabled: shiftsEnabledOpt?.label || 'false',
+                multipleShiftsList: shiftsListOpt?.label || '08:00, 08:30, 09:00',
+                lineApprovalMode: lineApprovalModeOpt?.label || 'INTERACTIVE',
+                lineHeaderTitle: lineHeaderTitleOpt?.label || 'Juijui Alert Center',
+                lateAlertTargetRoles: lateAlertTargetRolesOpt?.label || 'BOTH',
+                checkoutPenaltyTargetRoles: checkoutPenaltyTargetRolesOpt?.label || 'BOTH',
+                checkoutAlertEnabled: checkoutAlertEnabledOpt?.label || 'true',
+                checkoutAlertMode: checkoutAlertModeOpt?.label || 'AFTER_LIMIT',
+                checkoutAlertOffset: checkoutAlertOffsetOpt?.label || '5',
+                checkoutAlertTargetRoles: checkoutAlertTargetRolesOpt?.label || 'BOTH',
+                adminAbsentPenaltyEnabled: adminAbsentPenaltyEnabledOpt?.label || 'false',
+                forgotCheckInLimitHours: forgotCheckInLimitHoursOpt?.label || '12'
             });
         }
 
@@ -98,26 +138,16 @@ const AttendanceRulesView: React.FC<AttendanceRulesViewProps> = ({
         if (config?.GLOBAL_MULTIPLIERS?.OT_JP_RATE_PER_HOUR !== undefined) {
             setOtJpRate(config.GLOBAL_MULTIPLIERS.OT_JP_RATE_PER_HOUR.toString());
         }
-
-        // Location
-        const latOpt = masterOptions.find(o => o.type === 'WORK_CONFIG' && o.key === 'OFFICE_LAT');
-        const lngOpt = masterOptions.find(o => o.type === 'WORK_CONFIG' && o.key === 'OFFICE_LNG');
-        const radOpt = masterOptions.find(o => o.type === 'WORK_CONFIG' && o.key === 'OFFICE_RADIUS');
-
-        if (latOpt || lngOpt || radOpt) {
-            setOfficeConfig({
-                lat: latOpt?.label || '',
-                lng: lngOpt?.label || '',
-                radius: radOpt?.label || '500'
-            });
-        }
     }, [masterOptions, config]);
 
     const handleSaveTimeConfig = async () => {
         const updateOrInsert = async (key: string, val: string) => {
             const existing = masterOptions.find(o => o.type === 'WORK_CONFIG' && o.key === key);
             if (existing) {
-                await onUpdate({ ...existing, label: val });
+                // อัปเดตเฉพาะกรณีที่ค่ามีการเปลี่ยนแปลงจริง (Dirty Checking)
+                if (existing.label !== val) {
+                    await onUpdate({ ...existing, label: val });
+                }
             } else {
                  await onAdd({
                     type: 'WORK_CONFIG',
@@ -137,8 +167,23 @@ const AttendanceRulesView: React.FC<AttendanceRulesViewProps> = ({
         await updateOrInsert('OT_THRESHOLD_HOURS', tempTimeConfig.otThreshold);
         await updateOrInsert('CHECKOUT_PENALTY_TIME', tempTimeConfig.checkoutPenaltyTime);
         await updateOrInsert('DAILY_SUMMARY_DELAY_HOURS', tempTimeConfig.dailySummaryDelayHours);
+        await updateOrInsert('DAILY_SUMMARY_TIME', tempTimeConfig.dailySummaryTime || '18:00');
         await updateOrInsert('LINE_SUMMARY_DESTINATION', tempTimeConfig.lineSummaryDestination);
         await updateOrInsert('ENABLE_ATTENDANCE_RACE', tempTimeConfig.enableAttendanceRace);
+        await updateOrInsert('LATE_ALERT_MODE', tempTimeConfig.lateAlertMode || 'AFTER_LIMIT');
+        await updateOrInsert('LATE_ALERT_OFFSET', tempTimeConfig.lateAlertOffset || '5');
+        await updateOrInsert('MULTIPLE_SHIFTS_ENABLED', tempTimeConfig.multipleShiftsEnabled || 'false');
+        await updateOrInsert('MULTIPLE_SHIFTS_LIST', tempTimeConfig.multipleShiftsList || '08:00, 08:30, 09:00');
+        await updateOrInsert('LINE_APPROVAL_MODE', tempTimeConfig.lineApprovalMode || 'INTERACTIVE');
+        await updateOrInsert('LINE_HEADER_TITLE', tempTimeConfig.lineHeaderTitle || 'Juijui Alert Center');
+        await updateOrInsert('LATE_ALERT_TARGET_ROLES', tempTimeConfig.lateAlertTargetRoles || 'BOTH');
+        await updateOrInsert('CHECKOUT_PENALTY_TARGET_ROLES', tempTimeConfig.checkoutPenaltyTargetRoles || 'BOTH');
+        await updateOrInsert('CHECKOUT_ALERT_ENABLED', tempTimeConfig.checkoutAlertEnabled || 'true');
+        await updateOrInsert('CHECKOUT_ALERT_MODE', tempTimeConfig.checkoutAlertMode || 'AFTER_LIMIT');
+        await updateOrInsert('CHECKOUT_ALERT_OFFSET', tempTimeConfig.checkoutAlertOffset || '5');
+        await updateOrInsert('CHECKOUT_ALERT_TARGET_ROLES', tempTimeConfig.checkoutAlertTargetRoles || 'BOTH');
+        await updateOrInsert('ADMIN_ABSENT_PENALTY_ENABLED', tempTimeConfig.adminAbsentPenaltyEnabled || 'false');
+        await updateOrInsert('FORGOT_CHECKIN_LIMIT_HOURS', tempTimeConfig.forgotCheckInLimitHours || '12');
         
         const parsedRate = parseInt(otJpRate, 10);
         if (!isNaN(parsedRate)) {
@@ -152,37 +197,15 @@ const AttendanceRulesView: React.FC<AttendanceRulesViewProps> = ({
         await showAlert('บันทึกเวลาทำการเรียบร้อย ✅', 'สำเร็จ');
     };
 
-    const handleSaveLocationConfig = async () => {
-         const updateOrInsert = async (key: string, val: string) => {
-            const existing = masterOptions.find(o => o.type === 'WORK_CONFIG' && o.key === key);
-            if (existing) {
-                await onUpdate({ ...existing, label: val });
-            } else {
-                await onAdd({
-                    type: 'WORK_CONFIG',
-                    key: key,
-                    label: val,
-                    color: '',
-                    isActive: true,
-                    sortOrder: 0
-                });
-            }
-        };
-
-        await updateOrInsert('OFFICE_LAT', officeConfig.lat);
-        await updateOrInsert('OFFICE_LNG', officeConfig.lng);
-        await updateOrInsert('OFFICE_RADIUS', officeConfig.radius);
-        
-        await showAlert('บันทึกพิกัดเรียบร้อย! 🗺️', 'สำเร็จ');
-    };
-
     const handleSaveSelfieConfig = async () => {
         setIsSavingSelfie(true);
         try {
             const updateOrInsert = async (key: string, val: string) => {
                 const existing = masterOptions.find(o => o.type === 'WORK_CONFIG' && o.key === key);
                 if (existing) {
-                    await onUpdate({ ...existing, label: val });
+                    if (existing.label !== val) {
+                        await onUpdate({ ...existing, label: val });
+                    }
                 } else {
                     await onAdd({
                         type: 'WORK_CONFIG',
@@ -204,30 +227,6 @@ const AttendanceRulesView: React.FC<AttendanceRulesViewProps> = ({
         } finally {
             setIsSavingSelfie(false);
         }
-    };
-
-    const getCurrentLocation = () => {
-        setIsLocating(true);
-        if (!navigator.geolocation) {
-            showAlert('Browser ไม่รองรับ Geolocation', 'Error');
-            setIsLocating(false);
-            return;
-        }
-        navigator.geolocation.getCurrentPosition(
-            (pos) => {
-                setOfficeConfig(prev => ({
-                    ...prev,
-                    lat: pos.coords.latitude.toString(),
-                    lng: pos.coords.longitude.toString()
-                }));
-                setIsLocating(false);
-            },
-            (err) => {
-                showAlert('ไม่สามารถระบุตำแหน่งได้: ' + err.message, 'Error');
-                setIsLocating(false);
-            },
-            { enableHighAccuracy: true }
-        );
     };
 
     const attendanceTypes = masterOptions.filter(o => o.type === 'ATTENDANCE_TYPE');
@@ -306,11 +305,10 @@ const AttendanceRulesView: React.FC<AttendanceRulesViewProps> = ({
 
                         {activeTab === 'location' && (
                             <LocationGeofencingCard
-                                officeConfig={officeConfig}
-                                setOfficeConfig={setOfficeConfig}
-                                getCurrentLocation={getCurrentLocation}
-                                isLocating={isLocating}
-                                handleSaveLocationConfig={handleSaveLocationConfig}
+                                masterOptions={masterOptions}
+                                onAdd={onAdd}
+                                onUpdate={onUpdate}
+                                onDelete={onDelete}
                             />
                         )}
 

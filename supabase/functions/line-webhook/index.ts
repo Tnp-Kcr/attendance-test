@@ -47,6 +47,325 @@ Deno.serve(async (req: any) => {
       const userId = source.userId;
       const type = event.type;
 
+      // Handle interactive postback action buttons
+      if (type === 'postback') {
+        const data = event.postback?.data || '';
+        console.log(`Processing postback event from LINE User ID: ${userId} with data: ${data}`);
+        
+        const params: Record<string, string> = {};
+        const parts = data.split('&');
+        for (const part of parts) {
+          const [key, val] = part.split('=');
+          if (key) {
+            params[decodeURIComponent(key)] = decodeURIComponent(val || '');
+          }
+        }
+
+        const { action, req_id, requestId: paramReqId, id: paramId, req_type, requestType: paramReqType, type: paramType, notif_id } = params;
+        const targetRequestId = req_id || paramReqId || paramId;
+        const targetRequestType = req_type || paramReqType || paramType || 'WFH';
+
+        if (action && targetRequestId) {
+          // Verify admin role in profiles
+          const { data: profile, error: profError } = await supabaseAdmin
+            .from('profiles')
+            .select('id, role, full_name')
+            .eq('line_user_id', userId)
+            .maybeSingle();
+
+          if (profError || !profile || profile.role !== 'ADMIN') {
+            if (replyToken) {
+              const replyMsg = {
+                replyToken: replyToken,
+                messages: [
+                  {
+                    type: 'text',
+                    text: '⚠️ ขออภัยค่ะ บัญชี LINE ของคุณไม่มีสิทธิ์อนุมัติ หรือยังไม่ได้เชื่อมโยงกับโปรไฟล์ที่เป็น ADMIN ในระบบค่ะ'
+                  }
+                ]
+              };
+              await fetch(LINE_REPLY_API, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Authorization': `Bearer ${lineAccessToken}`
+                },
+                body: JSON.stringify(replyMsg)
+              });
+            }
+            continue;
+          }
+
+          // API Handshake with Express Backend
+          const lineAdminSecret = Deno.env.get('LINE_ADMIN_SECRET') || 'JUIJUI_SECRET_12345';
+          try {
+            const apiRes = await fetch(`${appUrl.replace(/\/$/, '')}/api/admin-approval/line-action`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${lineAdminSecret}`
+              },
+              body: JSON.stringify({
+                action,
+                requestId: targetRequestId,
+                requestType: targetRequestType,
+                notificationId: notif_id,
+                adminProfile: {
+                  id: profile.id,
+                  full_name: profile.full_name
+                }
+              })
+            });
+
+            let apiData: any = {};
+            try {
+              const resText = await apiRes.text();
+              try {
+                apiData = JSON.parse(resText);
+              } catch (_e) {
+                console.error('[Line Webhook] Backend returned non-JSON:', resText);
+                apiData = { 
+                  success: false, 
+                  error: resText.includes('already') || resText.includes('อนุมัติแล้ว') 
+                    ? resText 
+                    : 'ระบบประมวลผลหลังบ้านไม่สมบูรณ์ กรุณาตรวจสอบสถานะในระบบหลักค่ะ' 
+                };
+              }
+            } catch (fetchErr: any) {
+              console.error('[Line Webhook] Fetch error:', fetchErr);
+              apiData = { success: false, error: fetchErr.message };
+            }
+
+            if (apiRes.ok && apiData.success) {
+              const actionLabel = action === 'approve' ? 'อนุมัติ' : 'ปฏิเสธ';
+              const details = apiData.details;
+
+              let replyText = `✅ ดำเนินการ${actionLabel}คำขอเรียบร้อยแล้วค่ะ`;
+              if (details) {
+                const empName = details.employeeName || 'พนักงาน';
+                const reqType = details.requestType || targetRequestType || 'คำขอ';
+                const reqReason = details.reason || '-';
+                const adminNameStr = details.adminName || profile.full_name;
+
+                replyText = `✅ ดำเนินการ${actionLabel}คำขอเรียบร้อยแล้วค่ะ\n` +
+                  `👤 พนักงาน: ${empName}\n` +
+                  `📋 รายการ: ${reqType}\n` +
+                  `📝 รายละเอียด/เหตุผล: ${reqReason}\n` +
+                  `👮‍♂️ ผู้ดูแลที่ดำเนินการ: ${adminNameStr}`;
+              } else {
+                replyText = `✅ ดำเนินการ${actionLabel}คำขอโดยผู้ดูแล (${profile.full_name}) สำเร็จแล้วค่ะ!`;
+              }
+
+              if (replyToken) {
+                const replyMsg = {
+                  replyToken: replyToken,
+                  messages: [
+                    {
+                      type: 'text',
+                      text: replyText
+                    }
+                  ]
+                };
+                await fetch(LINE_REPLY_API, {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${lineAccessToken}`
+                  },
+                  body: JSON.stringify(replyMsg)
+                });
+              }
+            } else {
+              // Check if backend returned a specific status or duplicate warning message
+              const knownWarning = apiData.error && (
+                apiData.error.includes('ซ้ำซ้อน') || 
+                apiData.error.includes('อนุมัติแล้ว') || 
+                apiData.error.includes('ปฏิเสธแล้ว') ||
+                apiData.error.includes('ได้รับการ')
+              );
+
+              if (knownWarning) {
+                if (replyToken) {
+                  await fetch(LINE_REPLY_API, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${lineAccessToken}` },
+                    body: JSON.stringify({
+                      replyToken,
+                      messages: [{ type: 'text', text: `⚠️ ${apiData.error}` }]
+                    })
+                  });
+                }
+              } else {
+                // Direct database fallback using Edge Function's supabaseAdmin client
+                let fallbackMsg = '';
+                const targetStatus = action === 'approve' ? 'APPROVED' : 'REJECTED';
+                const actionLabel = action === 'approve' ? 'อนุมัติ' : 'ปฏิเสธ';
+
+                const { data: leaveReq } = await supabaseAdmin
+                  .from('leave_requests')
+                  .select('id, status, user_id, type, reason')
+                  .eq('id', targetRequestId)
+                  .maybeSingle();
+
+                if (leaveReq) {
+                  if (leaveReq.status !== 'PENDING') {
+                    const verb = leaveReq.status === 'APPROVED' ? 'อนุมัติ' : 'ปฏิเสธ';
+                    fallbackMsg = `⚠️ คำขอนี้ได้รับการ${verb}ไปแล้วค่ะ`;
+                  } else {
+                    await supabaseAdmin
+                      .from('leave_requests')
+                      .update({
+                        status: targetStatus,
+                        approver_id: profile.id,
+                        updated_at: new Date().toISOString()
+                      })
+                      .eq('id', targetRequestId);
+
+                    const { data: empProf } = await supabaseAdmin
+                      .from('profiles')
+                      .select('full_name')
+                      .eq('id', leaveReq.user_id)
+                      .maybeSingle();
+
+                    const empName = empProf?.full_name || 'พนักงาน';
+                    const reqTypeStr = leaveReq.type || targetRequestType || 'คำขอ';
+                    const reasonStr = leaveReq.reason || '-';
+
+                    await supabaseAdmin
+                      .from('notifications')
+                      .update({
+                        is_read: true,
+                        message: `[${actionLabel}แล้ว] คำขอ (${reqTypeStr}) ของพนักงาน ${empName} ได้รับการ${actionLabel}โดยแอดมินคุณ ${profile.full_name}`,
+                        title: `✅ ดำเนินการ${actionLabel}เรียบร้อย`
+                      })
+                      .eq('related_id', targetRequestId);
+
+                    fallbackMsg = `✅ ดำเนินการ${actionLabel}คำขอเรียบร้อยแล้วค่ะ\n` +
+                      `👤 พนักงาน: ${empName}\n` +
+                      `📋 รายการ: ${reqTypeStr}\n` +
+                      `📝 รายละเอียด/เหตุผล: ${reasonStr}\n` +
+                      `👮‍♂️ ผู้ดูแลที่ดำเนินการ: ${profile.full_name}`;
+                  }
+                } else {
+                  const { data: otReq } = await supabaseAdmin
+                    .from('ot_requests')
+                    .select('id, status, user_id, reason, title')
+                    .eq('id', targetRequestId)
+                    .maybeSingle();
+
+                  if (otReq) {
+                    if (otReq.status !== 'PENDING') {
+                      const verb = otReq.status === 'APPROVED' ? 'อนุมัติ' : 'ปฏิเสธ';
+                      fallbackMsg = `⚠️ คำขอ OT นี้ได้รับการ${verb}ไปแล้วค่ะ`;
+                    } else {
+                      await supabaseAdmin
+                        .from('ot_requests')
+                        .update({
+                          status: targetStatus,
+                          approver_id: profile.id,
+                          updated_at: new Date().toISOString()
+                        })
+                        .eq('id', targetRequestId);
+
+                      const { data: empProf } = await supabaseAdmin
+                        .from('profiles')
+                        .select('full_name')
+                        .eq('id', otReq.user_id)
+                        .maybeSingle();
+
+                      const empName = empProf?.full_name || 'พนักงาน';
+                      const reasonStr = otReq.reason || otReq.title || '-';
+
+                      await supabaseAdmin
+                        .from('notifications')
+                        .update({
+                          is_read: true,
+                          message: `[${actionLabel}แล้ว] คำขอ OT ของพนักงาน ${empName} ได้รับการ${actionLabel}โดยแอดมินคุณ ${profile.full_name}`,
+                          title: `✅ ดำเนินการ${actionLabel}เรียบร้อย`
+                        })
+                        .eq('related_id', targetRequestId);
+
+                      fallbackMsg = `✅ ดำเนินการ${actionLabel}คำขอเรียบร้อยแล้วค่ะ\n` +
+                        `👤 พนักงาน: ${empName}\n` +
+                        `📋 รายการ: ขออนุมัติ OT\n` +
+                        `📝 รายละเอียด/เหตุผล: ${reasonStr}\n` +
+                        `👮‍♂️ ผู้ดูแลที่ดำเนินการ: ${profile.full_name}`;
+                    }
+                  } else {
+                    fallbackMsg = '⚠️ ไม่พบข้อมูลคำขอนี้ในระบบค่ะ';
+                  }
+                }
+
+                if (replyToken) {
+                  await fetch(LINE_REPLY_API, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${lineAccessToken}` },
+                    body: JSON.stringify({
+                      replyToken,
+                      messages: [{ type: 'text', text: fallbackMsg }]
+                    })
+                  });
+                }
+              }
+            }
+          } catch (apiErr: any) {
+            console.error("API Handshake Error:", apiErr);
+            // Fallback: Try direct database update if network call failed
+            let fallbackMsg = '';
+            const targetStatus = action === 'approve' ? 'APPROVED' : 'REJECTED';
+            const actionLabel = action === 'approve' ? 'อนุมัติ' : 'ปฏิเสธ';
+
+            try {
+              const { data: leaveReq } = await supabaseAdmin
+                .from('leave_requests')
+                .select('id, status, user_id, type, reason')
+                .eq('id', targetRequestId)
+                .maybeSingle();
+
+              if (leaveReq && leaveReq.status === 'PENDING') {
+                await supabaseAdmin
+                  .from('leave_requests')
+                  .update({ status: targetStatus, approver_id: profile.id, updated_at: new Date().toISOString() })
+                  .eq('id', targetRequestId);
+
+                const { data: empProf } = await supabaseAdmin
+                  .from('profiles')
+                  .select('full_name')
+                  .eq('id', leaveReq.user_id)
+                  .maybeSingle();
+
+                const empName = empProf?.full_name || 'พนักงาน';
+                const reqTypeStr = leaveReq.type || targetRequestType || 'คำขอ';
+                const reasonStr = leaveReq.reason || '-';
+
+                fallbackMsg = `✅ ดำเนินการ${actionLabel}คำขอเรียบร้อยแล้วค่ะ\n` +
+                  `👤 พนักงาน: ${empName}\n` +
+                  `📋 รายการ: ${reqTypeStr}\n` +
+                  `📝 รายละเอียด/เหตุผล: ${reasonStr}\n` +
+                  `👮‍♂️ ผู้ดูแลที่ดำเนินการ: ${profile.full_name}`;
+              } else {
+                fallbackMsg = `❌ เกิดข้อผิดพลาดในการเชื่อมต่อหลังบ้าน: ${apiErr.message}`;
+              }
+            } catch (_dbErr) {
+              fallbackMsg = `❌ เกิดข้อผิดพลาดในการเชื่อมต่อหลังบ้าน: ${apiErr.message}`;
+            }
+
+            if (replyToken) {
+              const replyMsg = {
+                replyToken: replyToken,
+                messages: [{ type: 'text', text: fallbackMsg }]
+              };
+              await fetch(LINE_REPLY_API, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${lineAccessToken}` },
+                body: JSON.stringify(replyMsg)
+              });
+            }
+          }
+          continue;
+        }
+      }
+
       let shouldTrigger = false;
 
       // 1. ถ้าเป็นการเพิ่มเพื่อนใหม่ -> ส่งทักทายพร้อมปุ่มผูกบัญชีทันที
@@ -69,7 +388,7 @@ Deno.serve(async (req: any) => {
         console.log(`Processing triggered event type "${type}" for LINE User ID: ${userId}`);
 
         // Construct the custom link URL containing the line_user_id query param
-        const linkingUrl = `${appUrl.replace(/\/$/, '')}?line_user_id=${userId}`;
+        const linkingUrl = `${appUrl.replace(/\/$/, '')}?openExternalBrowser=1&line_user_id=${userId}`;
 
         // Construct beautiful Flex Message contents
         const flexPayload = {
